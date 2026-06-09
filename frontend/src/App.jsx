@@ -396,6 +396,95 @@ const Dots = () => (
   </span>
 );
 
+// ── Inline text formatter: handles **bold** and `code` ─────────────────────
+const InlineText = ({ text }) => {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.startsWith("**") && part.endsWith("**"))
+          return <strong key={i} style={{ color: S.text, fontWeight: 700 }}>{part.slice(2, -2)}</strong>;
+        if (part.startsWith("`") && part.endsWith("`"))
+          return <code key={i} style={{ background: "#0a1f12", border: `1px solid ${S.border2}`, borderRadius: 4, padding: "1px 6px", fontSize: 11, color: S.greenDim, fontFamily: S.mono }}>{part.slice(1, -1)}</code>;
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+};
+
+// ── FormattedText: renders numbered lists, bullets, section headers, paragraphs
+const FormattedText = ({ text }) => {
+  if (!text) return null;
+  const lines = text.split("\n");
+  const elements = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      elements.push(<div key={i} style={{ height: 8 }} />);
+      i++; continue;
+    }
+
+    // Numbered item: "1. text" or "1) text"
+    const numMatch = trimmed.match(/^(\d+)[.)]\s+(.+)/);
+    if (numMatch) {
+      elements.push(
+        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6 }}>
+          <span style={{ color: S.greenDim, fontWeight: 700, minWidth: 20, flexShrink: 0 }}>{numMatch[1]}.</span>
+          <span style={{ color: S.text, fontWeight: 600 }}><InlineText text={numMatch[2]} /></span>
+        </div>
+      );
+      i++; continue;
+    }
+
+    // Bullet: "* text" or "- text"
+    const bulletMatch = trimmed.match(/^[*\-•]\s+(.+)/);
+    if (bulletMatch) {
+      elements.push(
+        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 3, paddingLeft: 16 }}>
+          <span style={{ color: S.greenMid, flexShrink: 0 }}>▸</span>
+          <span style={{ color: S.textMid }}><InlineText text={bulletMatch[1]} /></span>
+        </div>
+      );
+      i++; continue;
+    }
+
+    // Indented sub-bullet: "  * text"
+    const subMatch = line.match(/^\s{2,}[*\-]\s+(.+)/);
+    if (subMatch) {
+      elements.push(
+        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 2, paddingLeft: 34 }}>
+          <span style={{ color: S.border2, flexShrink: 0 }}>·</span>
+          <span style={{ color: "#94a3b8", fontSize: 12 }}><InlineText text={subMatch[1]} /></span>
+        </div>
+      );
+      i++; continue;
+    }
+
+    // Section header ending with ":" and short enough to be a label
+    const headerMatch = trimmed.match(/^[-–]?\s*(.+):$/);
+    if (headerMatch && trimmed.length < 40) {
+      elements.push(
+        <div key={i} style={{ color: S.greenDim, fontSize: 11, fontWeight: 700, letterSpacing: 1, marginTop: 10, marginBottom: 4 }}>
+          {headerMatch[1].toUpperCase()}
+        </div>
+      );
+      i++; continue;
+    }
+
+    // Plain line
+    elements.push(
+      <div key={i} style={{ color: S.textMid, marginBottom: 2, lineHeight: 1.75 }}>
+        <InlineText text={trimmed} />
+      </div>
+    );
+    i++;
+  }
+  return <div>{elements}</div>;
+};
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [messages, setMessages]       = useState([]);
@@ -573,7 +662,9 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
               <span key={s} style={{ fontSize:10, padding:"3px 8px", border:`1px solid ${S.greenFade}`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>{s}</span>
             ))}
             <button onClick={clearChat} title="Clear chat"
-              style={{ background:"none", border:`1px solid ${S.border}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.textFaint, fontSize:10, fontFamily:S.mono, marginLeft:4 }}>
+              style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, marginLeft:4, letterSpacing:1, transition:"all 0.2s" }}
+              onMouseEnter={e => { e.currentTarget.style.background="#4ade8022"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.green; }}
+              onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.color=S.greenDim; e.currentTarget.style.borderColor=S.greenDim; }}>
               CLEAR
             </button>
           </div>
@@ -602,7 +693,7 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
                   <div style={{ fontSize:9, color:S.textFaint, letterSpacing:2, marginBottom:6 }}>ASSISTANT</div>
 
                   {/* Tool result cards */}
-                  {msg.toolResults?.map((tr, j) => (
+                  {/* {msg.toolResults?.map((tr, j) => (
                     <div key={j} style={{ background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:10, padding:"12px 16px", marginBottom:10 }}>
                       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, flexWrap:"wrap" }}>
                         <span style={{ fontSize:9, padding:"2px 8px", background:"#0a2a1a", border:`1px solid #1e5a3e`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>TOOL</span>
@@ -611,11 +702,11 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
                       </div>
                       <ResultTable toolName={tr.toolName} data={tr.result} />
                     </div>
-                  ))}
+                  ))} */}
 
                   {/* LLM text response */}
                   <div style={{ background:S.bgCard, border:`1px solid ${S.border}`, borderRadius:"2px 12px 12px 12px", padding:"12px 16px", fontSize:13, color:S.textMid, lineHeight:1.75 }}>
-                    {msg.text}
+                    <FormattedText text={msg.text} />
                   </div>
                 </div>
               )}
@@ -632,14 +723,7 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
           {loading && (
             <div style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 0", marginBottom:8 }}>
               <Dots />
-              {toolActivity ? (
-                <span style={{ fontSize:11, color:S.greenDim }}>
-                  Calling <span style={{ color:S.green, fontWeight:700 }}>{toolActivity.name}()</span>
-                  <span style={{ color:S.textFaint }}> · {JSON.stringify(toolActivity.args)}</span>
-                </span>
-              ) : (
-                <span style={{ fontSize:11, color:S.textFaint }}>Thinking...</span>
-              )}
+              <span style={{ fontSize: 11, color: "#2d6b4a" }}>Fetching your AWS data...</span>
             </div>
           )}
 
