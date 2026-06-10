@@ -123,10 +123,10 @@ const AWS_TOOLS = [
 ];
 
 // ── Real backend call ────────────────────────────────────────────────────────
-const callBackend = async (toolName, args) => {
-  const res = await fetch(`${BACKEND_URL}/aws`, {
+const callBackend = async (toolName, args, tok) => {
+  const res = await fetch(`${BACKEND_URL}/tool`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
     body: JSON.stringify({ tool: toolName, args }),
   });
   if (!res.ok) {
@@ -396,7 +396,8 @@ const Dots = () => (
   </span>
 );
 
-// ── Inline text formatter: handles **bold** and `code` ─────────────────────
+
+// ── Inline text formatter ────────────────────────────────────────────────────
 const InlineText = ({ text }) => {
   const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
   return (
@@ -412,7 +413,7 @@ const InlineText = ({ text }) => {
   );
 };
 
-// ── FormattedText: renders numbered lists, bullets, section headers, paragraphs
+// ── FormattedText: renders numbered lists, bullets, headers, paragraphs ───────
 const FormattedText = ({ text }) => {
   if (!text) return null;
   const lines = text.split("\n");
@@ -421,72 +422,35 @@ const FormattedText = ({ text }) => {
   while (i < lines.length) {
     const line = lines[i];
     const trimmed = line.trim();
-
-    if (!trimmed) {
-      elements.push(<div key={i} style={{ height: 8 }} />);
-      i++; continue;
-    }
-
-    // Numbered item: "1. text" or "1) text"
+    if (!trimmed) { elements.push(<div key={i} style={{ height: 8 }} />); i++; continue; }
     const numMatch = trimmed.match(/^(\d+)[.)]\s+(.+)/);
     if (numMatch) {
-      elements.push(
-        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6 }}>
-          <span style={{ color: S.greenDim, fontWeight: 700, minWidth: 20, flexShrink: 0 }}>{numMatch[1]}.</span>
-          <span style={{ color: S.text, fontWeight: 600 }}><InlineText text={numMatch[2]} /></span>
-        </div>
-      );
-      i++; continue;
+      elements.push(<div key={i} style={{ display:"flex", gap:10, marginBottom:6 }}>
+        <span style={{ color:S.greenDim, fontWeight:700, minWidth:20, flexShrink:0 }}>{numMatch[1]}.</span>
+        <span style={{ color:S.text, fontWeight:600 }}><InlineText text={numMatch[2]} /></span>
+      </div>); i++; continue;
     }
-
-    // Bullet: "* text" or "- text"
     const bulletMatch = trimmed.match(/^[*\-•]\s+(.+)/);
     if (bulletMatch) {
-      elements.push(
-        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 3, paddingLeft: 16 }}>
-          <span style={{ color: S.greenMid, flexShrink: 0 }}>▸</span>
-          <span style={{ color: S.textMid }}><InlineText text={bulletMatch[1]} /></span>
-        </div>
-      );
-      i++; continue;
+      elements.push(<div key={i} style={{ display:"flex", gap:10, marginBottom:3, paddingLeft:16 }}>
+        <span style={{ color:S.greenMid, flexShrink:0 }}>▸</span>
+        <span style={{ color:S.textMid }}><InlineText text={bulletMatch[1]} /></span>
+      </div>); i++; continue;
     }
-
-    // Indented sub-bullet: "  * text"
-    const subMatch = line.match(/^\s{2,}[*\-]\s+(.+)/);
-    if (subMatch) {
-      elements.push(
-        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 2, paddingLeft: 34 }}>
-          <span style={{ color: S.border2, flexShrink: 0 }}>·</span>
-          <span style={{ color: "#94a3b8", fontSize: 12 }}><InlineText text={subMatch[1]} /></span>
-        </div>
-      );
-      i++; continue;
-    }
-
-    // Section header ending with ":" and short enough to be a label
     const headerMatch = trimmed.match(/^[-–]?\s*(.+):$/);
     if (headerMatch && trimmed.length < 40) {
-      elements.push(
-        <div key={i} style={{ color: S.greenDim, fontSize: 11, fontWeight: 700, letterSpacing: 1, marginTop: 10, marginBottom: 4 }}>
-          {headerMatch[1].toUpperCase()}
-        </div>
-      );
-      i++; continue;
+      elements.push(<div key={i} style={{ color:S.greenDim, fontSize:11, fontWeight:700, letterSpacing:1, marginTop:10, marginBottom:4 }}>
+        {headerMatch[1].toUpperCase()}
+      </div>); i++; continue;
     }
-
-    // Plain line
-    elements.push(
-      <div key={i} style={{ color: S.textMid, marginBottom: 2, lineHeight: 1.75 }}>
-        <InlineText text={trimmed} />
-      </div>
-    );
+    elements.push(<div key={i} style={{ color:S.textMid, marginBottom:2, lineHeight:1.75 }}><InlineText text={trimmed} /></div>);
     i++;
   }
   return <div>{elements}</div>;
 };
 
 // ── App ──────────────────────────────────────────────────────────────────────
-export default function App() {
+export default function App({ token, username, onLogout }) {
   const [messages, setMessages]       = useState([]);
   const [input, setInput]             = useState("");
   const [loading, setLoading]         = useState(false);
@@ -551,7 +515,7 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
 
           let result;
           try {
-            result = await callBackend(fn, args);
+            result = await callBackend(fn, args, token);
           } catch (e) {
             result = { error: e.message };
           }
@@ -599,12 +563,16 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
 
         {/* Logo */}
         <div style={{ padding:"18px 16px 14px", borderBottom:`1px solid ${S.border}` }}>
-          <div style={{ fontSize:9, color:S.textFaint, letterSpacing:3, marginBottom:3 }}>AWS INFRA QUERY</div>
+          <div style={{ fontSize:9, color:S.textFaint, letterSpacing:3, marginBottom:3 }}>CLOUD COMMAND CENTER</div>
           <div style={{ fontSize:18, color:S.green, fontWeight:700, letterSpacing:2 }}>CONSOLE</div>
           <div style={{ fontSize:10, color:S.textFaint, marginTop:4 }}>
             {awsStatus?.aws_connected
               ? <span style={{ color:S.greenDim }}>● {awsStatus.account_id} · {awsStatus.arn?.split("/").pop()}</span>
               : <span style={{ color:S.red }}>● Not connected</span>}
+          </div>
+          <div style={{ fontSize:10, color:S.greenMid, marginTop:6, display:"flex", alignItems:"center", gap:5 }}>
+            <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
+            Logged in as <strong style={{ color:S.green }}>{username}</strong>
           </div>
         </div>
 
@@ -654,7 +622,7 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
         <div style={{ padding:"10px 18px", borderBottom:`1px solid ${S.border}`, display:"flex", alignItems:"center", gap:10, background:S.bgPanel, flexShrink:0 }}>
           <button onClick={() => setSidebarOpen(o => !o)} style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"5px 9px", cursor:"pointer", color:S.greenDim, fontSize:13, fontFamily:S.mono }}>☰</button>
           <div style={{ flex:1 }}>
-            <div style={{ fontSize:11, color:S.green, fontWeight:700, letterSpacing:2 }}>AWS INFRASTRUCTURE QUERY PLATFORM</div>
+            <div style={{ fontSize:11, color:S.green, fontWeight:700, letterSpacing:2 }}>CLOUD COMMAND CENTER PLATFORM</div>
             <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Groq LLaMA-3 → Boto3 → AWS</div>
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
@@ -666,6 +634,14 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
               onMouseEnter={e => { e.currentTarget.style.background="#4ade8022"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.green; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.color=S.greenDim; e.currentTarget.style.borderColor=S.greenDim; }}>
               CLEAR
+            </button>
+            <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />
+            <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>
+            <button onClick={onLogout} title="Logout"
+              style={{ background:"none", border:`1px solid #4a1525`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:"#ff4d6d", fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
+              onMouseEnter={e => { e.currentTarget.style.background="#1a0509"; }}
+              onMouseLeave={e => { e.currentTarget.style.background="none"; }}>
+              LOGOUT
             </button>
           </div>
         </div>

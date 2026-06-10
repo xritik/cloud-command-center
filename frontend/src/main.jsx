@@ -1,7 +1,7 @@
-import { StrictMode, useState } from "react";
+import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
-import Auth from "./Auth";
+import App from "./App.jsx";
+import Auth from "./Auth.jsx";
 
 function Root() {
   const [token, setToken]       = useState(() => localStorage.getItem("aqp_token") || "");
@@ -25,5 +25,6 @@ function Root() {
   return <App token={token} username={username} onLogout={handleLogout} />;
 }
 
-const root = createRoot(document.getElementById("root"));
-root.render(<StrictMode><Root /></StrictMode>);
+createRoot(document.getElementById("root")).render(
+  <StrictMode><Root /></StrictMode>
+);
