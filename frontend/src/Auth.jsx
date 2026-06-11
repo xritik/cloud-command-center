@@ -52,21 +52,21 @@ export default function Auth({ onLogin }) {
   const handleKey = (e) => { if (e.key === "Enter") submit(); };
 
   return (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", background:S.bg, fontFamily:S.mono }}>
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh", background:S.bg, fontFamily:S.mono, padding:"16px 0", overflowY:"auto" }}>
 
       {/* Background grid effect */}
       <div style={{ position:"fixed", inset:0, backgroundImage:`linear-gradient(${S.border} 1px, transparent 1px), linear-gradient(90deg, ${S.border} 1px, transparent 1px)`, backgroundSize:"40px 40px", opacity:0.3, pointerEvents:"none" }} />
 
-      <div style={{ width:"100%", maxWidth:420, padding:"0 20px", position:"relative", zIndex:1 }}>
+      <div style={{ width:"100%", maxWidth:420, padding:"0 16px", position:"relative", zIndex:1 }}>
 
         {/* Logo */}
         <div style={{ textAlign:"center", marginBottom:36 }}>
-          <div style={{ fontSize:36, color:S.green, letterSpacing:4, fontWeight:700, textShadow:`0 0 30px ${S.green}44` }}>⬡ AWS</div>
-          <div style={{ fontSize:11, color:S.greenMid, letterSpacing:3, marginTop:6 }}>CLOUD COMMAND CENTER</div>
+          <div style={{ fontSize:"clamp(24px, 8vw, 36px)", color:S.green, letterSpacing:4, fontWeight:700, textShadow:`0 0 30px ${S.green}44` }}>⬡ AWS</div>
+          <div style={{ fontSize:"clamp(9px, 2.5vw, 11px)", color:S.greenMid, letterSpacing:3, marginTop:6 }}>CLOUD COMMAND CENTER</div>
         </div>
 
         {/* Card */}
-        <div style={{ background:S.bgPanel, border:`1px solid ${S.border2}`, borderRadius:16, padding:"32px 28px", boxShadow:`0 0 40px #00e5a008` }}>
+        <div style={{ background:S.bgPanel, border:`1px solid ${S.border2}`, borderRadius:16, padding:"clamp(20px, 5vw, 32px) clamp(16px, 5vw, 28px)", boxShadow:`0 0 40px #00e5a008` }}>
 
           {/* Tab toggle */}
           <div style={{ display:"flex", marginBottom:28, background:S.bgCard, borderRadius:10, padding:4, border:`1px solid ${S.border}` }}>
@@ -90,7 +90,7 @@ export default function Auth({ onLogin }) {
               onKeyDown={handleKey}
               placeholder="e.g. Joy"
               autoFocus
-              style={{ width:"100%", background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"11px 14px", color:S.text, fontSize:13, outline:"none", fontFamily:S.mono, boxSizing:"border-box", transition:"border-color 0.2s" }}
+              style={{ width:"100%", background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"13px 14px", color:S.text, fontSize:16, outline:"none", fontFamily:S.mono, boxSizing:"border-box", transition:"border-color 0.2s" }}
               onFocus={e => e.target.style.borderColor = S.greenMid}
               onBlur={e  => e.target.style.borderColor = S.border2}
             />
@@ -104,7 +104,7 @@ export default function Auth({ onLogin }) {
               onChange={e => setPassword(e.target.value)}
               onKeyDown={handleKey}
               placeholder="Min 6 characters"
-              style={{ width:"100%", background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"11px 14px", color:S.text, fontSize:13, outline:"none", fontFamily:S.mono, boxSizing:"border-box", transition:"border-color 0.2s" }}
+              style={{ width:"100%", background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"13px 14px", color:S.text, fontSize:16, outline:"none", fontFamily:S.mono, boxSizing:"border-box", transition:"border-color 0.2s" }}
               onFocus={e => e.target.style.borderColor = S.greenMid}
               onBlur={e  => e.target.style.borderColor = S.border2}
             />
@@ -124,7 +124,7 @@ export default function Auth({ onLogin }) {
 
           {/* Submit button */}
           <button onClick={submit} disabled={loading}
-            style={{ width:"100%", padding:"13px 0", background: loading ? S.bgCard : S.green, border:"none", borderRadius:10, cursor: loading ? "not-allowed" : "pointer", color: loading ? S.greenMid : S.bg, fontSize:13, fontWeight:700, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}>
+            style={{ width:"100%", padding:"15px 0", background: loading ? S.bgCard : S.green, border:"none", borderRadius:10, cursor: loading ? "not-allowed" : "pointer", color: loading ? S.greenMid : S.bg, fontSize:13, fontWeight:700, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}>
             {loading ? "Please wait..." : mode === "login" ? "LOGIN →" : "CREATE ACCOUNT →"}
           </button>
 
@@ -147,6 +147,10 @@ export default function Auth({ onLogin }) {
         * { box-sizing: border-box; }
         input::placeholder { color: ${S.greenMid}; opacity: 0.6; }
         button:not(:disabled):active { transform: scale(0.98); }
+        @media (max-width: 480px) {
+          * { -webkit-tap-highlight-color: transparent; }
+          input, button { touch-action: manipulation; }
+        }
       `}</style>
     </div>
   );

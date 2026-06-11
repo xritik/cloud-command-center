@@ -457,6 +457,7 @@ export default function App({ token, username, onLogout }) {
   const [toolActivity, setToolActivity] = useState(null);
   const [history, setHistory]         = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isMobile, setIsMobile]       = useState(window.innerWidth < 768);
   const [awsStatus, setAwsStatus]     = useState(null);
   const [region, setRegion]           = useState("ap-south-1");
   const [regions, setRegions]         = useState([
@@ -490,6 +491,18 @@ export default function App({ token, username, onLogout }) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  // Track mobile vs desktop
+  useEffect(() => {
+    const handleResize = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      if (mobile) setSidebarOpen(false);
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const sendMessage = useCallback(async (text) => {
     const userText = (text || input).trim();
@@ -584,8 +597,27 @@ export default function App({ token, username, onLogout }) {
   return (
     <div style={{ display:"flex", height:"100vh", background:S.bg, fontFamily:S.mono, color:S.textMid, overflow:"hidden" }}>
 
+      {/* ── Sidebar overlay backdrop on mobile ── */}
+      {isMobile && sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)}
+          style={{ position:"fixed", inset:0, background:"#00000088", zIndex:10 }} />
+      )}
+
       {/* ── Sidebar ── */}
-      <div style={{ width:sidebarOpen?262:0, minWidth:sidebarOpen?262:0, transition:"all 0.25s", overflow:"hidden", borderRight:`1px solid ${S.border}`, background:S.bgPanel, display:"flex", flexDirection:"column", flexShrink:0 }}>
+      <div style={{
+        width: sidebarOpen ? 262 : 0,
+        minWidth: sidebarOpen ? 262 : 0,
+        transition: "all 0.25s",
+        overflow: "hidden",
+        borderRight: `1px solid ${S.border}`,
+        background: S.bgPanel,
+        display: "flex",
+        flexDirection: "column",
+        flexShrink: 0,
+        ...(isMobile && sidebarOpen ? {
+          position: "fixed", top: 0, left: 0, height: "100vh", zIndex: 11, width: 262, minWidth: 262
+        } : {})
+      }}>
 
         {/* Logo */}
         <div style={{ padding:"18px 16px 14px", borderBottom:`1px solid ${S.border}` }}>
@@ -649,20 +681,24 @@ export default function App({ token, username, onLogout }) {
 
         {/* Header */}
         <div style={{ padding:"10px 18px", borderBottom:`1px solid ${S.border}`, display:"flex", alignItems:"center", gap:10, background:S.bgPanel, flexShrink:0 }}>
-          <button onClick={() => setSidebarOpen(o => !o)} style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"5px 9px", cursor:"pointer", color:S.greenDim, fontSize:13, fontFamily:S.mono }}>☰</button>
-          <div style={{ flex:1 }}>
-            <div style={{ fontSize:11, color:S.green, fontWeight:700, letterSpacing:2 }}>CLOUD COMMAND CENTER PLATFORM</div>
-            <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Groq LLaMA-3 → Boto3 → AWS</div>
+          <button onClick={() => setSidebarOpen(o => !o)} style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"5px 9px", cursor:"pointer", color:S.greenDim, fontSize:13, fontFamily:S.mono, flexShrink:0 }}>☰</button>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize: isMobile ? 9 : 11, color:S.green, fontWeight:700, letterSpacing: isMobile ? 1 : 2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+              {isMobile ? "CLOUD CMD CENTER" : "CLOUD COMMAND CENTER PLATFORM"}
+            </div>
+            {!isMobile && <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Groq LLaMA-3 → Boto3 → AWS</div>}
           </div>
-          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            {["EC2","CloudWatch","STS"].map(s => (
+          <div style={{ display:"flex", gap: isMobile ? 6 : 8, alignItems:"center", flexShrink:0 }}>
+            {/* Hide service badges on mobile */}
+            {!isMobile && ["EC2","CloudWatch","STS"].map(s => (
               <span key={s} style={{ fontSize:10, padding:"3px 8px", border:`1px solid ${S.greenFade}`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>{s}</span>
             ))}
-            <div style={{ width:1, height:20, background:S.border2 }} />
+            {!isMobile && <div style={{ width:1, height:20, background:S.border2 }} />}
+            {/* Region dropdown — compact on mobile */}
             <select
               value={region}
               onChange={e => setRegion(e.target.value)}
-              style={{ background:"#070f0a", border:`1px solid ${S.border2}`, borderRadius:6, padding:"4px 10px", color:S.greenDim, fontSize:10, fontFamily:S.mono, cursor:"pointer", outline:"none", letterSpacing:1, transition:"border-color 0.2s" }}
+              style={{ background:"#070f0a", border:`1px solid ${S.border2}`, borderRadius:6, padding: isMobile ? "4px 6px" : "4px 10px", color:S.greenDim, fontSize: isMobile ? 9 : 10, fontFamily:S.mono, cursor:"pointer", outline:"none", letterSpacing:1, maxWidth: isMobile ? 110 : "none", transition:"border-color 0.2s" }}
               onFocus={e => e.target.style.borderColor=S.greenMid}
               onBlur={e  => e.target.style.borderColor=S.border2}>
               {regions.map(r => (
@@ -670,24 +706,24 @@ export default function App({ token, username, onLogout }) {
               ))}
             </select>
             <button onClick={clearChat} title="Clear chat"
-              style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, marginLeft:4, letterSpacing:1, transition:"all 0.2s" }}
+              style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#4ade8022"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.green; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.color=S.greenDim; e.currentTarget.style.borderColor=S.greenDim; }}>
-              CLEAR
+              {isMobile ? "CLR" : "CLEAR"}
             </button>
-            <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />
-            <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>
+            {!isMobile && <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />}
+            {!isMobile && <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>}
             <button onClick={onLogout} title="Logout"
               style={{ background:"none", border:`1px solid #4a1525`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:"#ff4d6d", fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#1a0509"; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; }}>
-              LOGOUT
+              {isMobile ? "↩" : "LOGOUT"}
             </button>
           </div>
         </div>
 
         {/* Messages */}
-        <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
+        <div style={{ flex:1, overflowY:"auto", padding: isMobile ? "12px 12px" : "20px 24px" }}>
           {messages.length === 0 && (
             <div style={{ textAlign:"center", marginTop:80, color:S.textFaint }}>
               <div style={{ fontSize:40, marginBottom:16, opacity:0.15 }}>⬡</div>
@@ -699,7 +735,7 @@ export default function App({ token, username, onLogout }) {
           {messages.map((msg, i) => (
             <div key={i} style={{ marginBottom:20, display:"flex", flexDirection:"column", alignItems: msg.type==="user" ? "flex-end" : "flex-start" }}>
               {msg.type === "user" && (
-                <div style={{ maxWidth:"65%", background:"#0a1f12", border:`1px solid ${S.greenFade}`, borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize:13, color:S.text, lineHeight:1.6 }}>
+                <div style={{ maxWidth: isMobile ? "92%" : "65%", background:"#0a1f12", border:`1px solid ${S.greenFade}`, borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize: isMobile ? 12 : 13, color:S.text, lineHeight:1.6 }}>
                   {msg.text}
                 </div>
               )}
@@ -747,7 +783,7 @@ export default function App({ token, username, onLogout }) {
         </div>
 
         {/* Input bar */}
-        <div style={{ padding:"14px 20px", borderTop:`1px solid ${S.border}`, background:S.bgPanel, flexShrink:0 }}>
+        <div style={{ padding: isMobile ? "10px 12px" : "14px 20px", borderTop:`1px solid ${S.border}`, background:S.bgPanel, flexShrink:0 }}>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             <span style={{ color:S.textFaint, fontSize:13, userSelect:"none" }}>$</span>
             <input
@@ -767,9 +803,7 @@ export default function App({ token, username, onLogout }) {
               {loading ? <Dots /> : "RUN"}
             </button>
           </div>
-          <div style={{ marginTop:7, fontSize:10, color:S.border2 }}>
-            Enter to send · Shift+Enter for newline · Backend: {BACKEND_URL}
-          </div>
+          {!isMobile && <div style={{ marginTop:7, fontSize:10, color:S.border2 }}>Enter to send · Shift+Enter for newline · Backend: {BACKEND_URL}</div>}
         </div>
       </div>
 
@@ -784,6 +818,9 @@ export default function App({ token, username, onLogout }) {
         }
         button:not(:disabled):active { transform:scale(0.96); }
         input::placeholder { color: ${S.textFaint}; }
+        @media (max-width: 767px) {
+          select option { font-size: 12px; }
+        }
       `}</style>
     </div>
   );
