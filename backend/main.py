@@ -9,6 +9,7 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
+from contextvars import ContextVar
 from typing import Optional
 
 # ── Third-party imports ───────────────────────────────────────────────────────
@@ -42,17 +43,18 @@ app.add_middleware(
 
 # ── AWS clients ───────────────────────────────────────────────────────────────
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+current_region: ContextVar[str] = ContextVar("current_region", default=AWS_REGION)
 
 def get_ec2():
     return boto3.client(
-        "ec2", region_name=AWS_REGION,
+        "ec2", region_name=current_region.get(),
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
 def get_cw():
     return boto3.client(
-        "cloudwatch", region_name=AWS_REGION,
+        "cloudwatch", region_name=current_region.get(),
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
@@ -103,10 +105,12 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_
 class ChatRequest(BaseModel):
     message: str
     history: list = []
+    region: str = "ap-south-1"
 
 class DirectToolRequest(BaseModel):
     tool: str
     args: dict = {}
+    region: str = "ap-south-1"
 
 class AuthRequest(BaseModel):
     username: str
@@ -495,10 +499,12 @@ def me(username: str = Depends(get_current_user)):
 
 @app.post("/chat")
 async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
+    # Set region from request so all Boto3 calls use it
+    current_region.set(req.region)
     system_msg = {
         "role": "system",
         "content": (
-            f"You are an expert AWS Infrastructure Assistant for region {AWS_REGION}. "
+            f"You are an expert AWS Infrastructure Assistant for region {req.region}. "
             "Use the provided tools to fetch real AWS data. Never guess or fabricate details. "
             "After calling tools, summarize clearly and concisely. "
             "If an instance has no public IP, say so explicitly."
@@ -548,8 +554,28 @@ async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
     return {"reply": "Reached max tool call limit.", "tool_calls": tool_calls_log}
 
 
+@app.get("/regions")
+def list_regions(username: str = Depends(get_current_user)):
+    try:
+        ec2 = boto3.client("ec2", region_name="us-east-1",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))
+        resp = ec2.describe_regions(AllRegions=False)
+        regions = sorted([r["RegionName"] for r in resp["Regions"]])
+        return {"regions": regions}
+    except Exception:
+        return {"regions": [
+            "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
+            "ap-southeast-3","ap-northeast-1","ap-northeast-2","ap-northeast-3",
+            "us-east-1","us-east-2","us-west-1","us-west-2",
+            "eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-central-2",
+            "eu-north-1","ca-central-1","sa-east-1","af-south-1","me-south-1"
+        ]}
+
+
 @app.post("/tool")
-def direct_tool(req: DirectToolRequest):
+def direct_tool(req: DirectToolRequest, username: str = Depends(get_current_user)):
+    current_region.set(req.region)
     return run_tool(req.tool, req.args)
 
 

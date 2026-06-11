@@ -123,11 +123,11 @@ const AWS_TOOLS = [
 ];
 
 // ── Real backend call ────────────────────────────────────────────────────────
-const callBackend = async (toolName, args, tok) => {
+const callBackend = async (toolName, args, tok, region = "ap-south-1") => {
   const res = await fetch(`${BACKEND_URL}/tool`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
-    body: JSON.stringify({ tool: toolName, args }),
+    body: JSON.stringify({ tool: toolName, args, region }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -458,17 +458,33 @@ export default function App({ token, username, onLogout }) {
   const [history, setHistory]         = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [awsStatus, setAwsStatus]     = useState(null);
+  const [region, setRegion]           = useState("ap-south-1");
+  const [regions, setRegions]         = useState([
+    "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
+    "ap-northeast-1","ap-northeast-2","ap-northeast-3",
+    "us-east-1","us-east-2","us-west-1","us-west-2",
+    "eu-west-1","eu-west-2","eu-west-3","eu-central-1",
+    "ca-central-1","sa-east-1","af-south-1","me-south-1"
+  ]);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
   // groqMessages holds the raw OpenAI-format conversation for the API
   const groqConvRef = useRef([]);
 
-  // Check backend health on load
+  // Check backend health + fetch regions on load
   useEffect(() => {
     fetch(`${BACKEND_URL}/health`)
       .then(r => r.json())
       .then(d => setAwsStatus(d))
       .catch(() => setAwsStatus({ aws_connected: false, error: "Backend unreachable" }));
+    if (token) {
+      fetch(`${BACKEND_URL}/regions`, {
+        headers: { "Authorization": `Bearer ${token}` }
+      })
+        .then(r => r.json())
+        .then(data => { if (data.regions) setRegions(data.regions); })
+        .catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
@@ -485,16 +501,20 @@ export default function App({ token, username, onLogout }) {
     // Append to display messages
     setMessages(prev => [...prev, { type: "user", text: userText }]);
 
-    // System prompt (added only once at start)
+    // Always keep system prompt in sync with selected region
+    const systemPrompt = {
+      role: "system",
+      content: `You are an AWS Infrastructure Assistant powered by Groq and Boto3.
+    You are currently querying AWS region: ${region}.
+    Answer questions about EC2 instances, CloudWatch metrics, security groups, and EBS volumes.
+    Always use the provided tools to fetch live data. Be concise and precise.
+    When listing instances, always show them in a clear structured way.
+    Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
+    };
     if (groqConvRef.current.length === 0) {
-      groqConvRef.current.push({
-        role: "system",
-        content: `You are an AWS Infrastructure Assistant powered by Groq and Boto3.
-Answer questions about EC2 instances, CloudWatch metrics, security groups, and EBS volumes.
-Always use the provided tools to fetch live data. Be concise and precise.
-When listing instances, always show them in a clear structured way.
-Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
-      });
+      groqConvRef.current.push(systemPrompt);
+    } else {
+      groqConvRef.current[0] = systemPrompt;
     }
 
     groqConvRef.current.push({ role: "user", content: userText });
@@ -515,7 +535,7 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
 
           let result;
           try {
-            result = await callBackend(fn, args, token);
+            result = await callBackend(fn, args, token, region);
           } catch (e) {
             result = { error: e.message };
           }
@@ -544,7 +564,7 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
       setToolActivity(null);
       inputRef.current?.focus();
     }
-  }, [input, loading]);
+  }, [input, loading, region, token]);
 
   const handleKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -554,6 +574,12 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
     setMessages([]);
     groqConvRef.current = [];
   };
+
+  // Reset conversation when region changes so system prompt reflects new region
+  useEffect(() => {
+    groqConvRef.current = [];
+    setMessages([]);
+  }, [region]);
 
   return (
     <div style={{ display:"flex", height:"100vh", background:S.bg, fontFamily:S.mono, color:S.textMid, overflow:"hidden" }}>
@@ -569,6 +595,9 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
             {awsStatus?.aws_connected
               ? <span style={{ color:S.greenDim }}>● {awsStatus.account_id} · {awsStatus.arn?.split("/").pop()}</span>
               : <span style={{ color:S.red }}>● Not connected</span>}
+          </div>
+          <div style={{ fontSize:10, color:S.greenMid, marginTop:4 }}>
+            Region: <span style={{ color:S.green }}>{region}</span>
           </div>
           <div style={{ fontSize:10, color:S.greenMid, marginTop:6, display:"flex", alignItems:"center", gap:5 }}>
             <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
@@ -629,6 +658,17 @@ Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
             {["EC2","CloudWatch","STS"].map(s => (
               <span key={s} style={{ fontSize:10, padding:"3px 8px", border:`1px solid ${S.greenFade}`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>{s}</span>
             ))}
+            <div style={{ width:1, height:20, background:S.border2 }} />
+            <select
+              value={region}
+              onChange={e => setRegion(e.target.value)}
+              style={{ background:"#070f0a", border:`1px solid ${S.border2}`, borderRadius:6, padding:"4px 10px", color:S.greenDim, fontSize:10, fontFamily:S.mono, cursor:"pointer", outline:"none", letterSpacing:1, transition:"border-color 0.2s" }}
+              onFocus={e => e.target.style.borderColor=S.greenMid}
+              onBlur={e  => e.target.style.borderColor=S.border2}>
+              {regions.map(r => (
+                <option key={r} value={r} style={{ background:"#040d07", color:S.textMid }}>{r}</option>
+              ))}
+            </select>
             <button onClick={clearChat} title="Clear chat"
               style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, marginLeft:4, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#4ade8022"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.green; }}
