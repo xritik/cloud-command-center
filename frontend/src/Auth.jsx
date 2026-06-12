@@ -25,6 +25,7 @@ export default function Auth({ onLogin }) {
   const [error, setError]     = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState("");
+  const [showPwd, setShowPwd]   = useState(false);
 
   const submit = async () => {
     setError(""); setSuccess("");
@@ -98,16 +99,22 @@ export default function Auth({ onLogin }) {
 
           <div style={{ marginBottom:24 }}>
             <div style={{ fontSize:10, color:S.greenMid, letterSpacing:1, marginBottom:6 }}>PASSWORD</div>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              onKeyDown={handleKey}
-              placeholder="Min 6 characters"
-              style={{ width:"100%", background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"13px 14px", color:S.text, fontSize:16, outline:"none", fontFamily:S.mono, boxSizing:"border-box", transition:"border-color 0.2s" }}
-              onFocus={e => e.target.style.borderColor = S.greenMid}
-              onBlur={e  => e.target.style.borderColor = S.border2}
-            />
+            <div style={{ position:"relative" }}>
+              <input
+                type={showPwd ? "text" : "password"}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                onKeyDown={handleKey}
+                placeholder="Min 6 characters"
+                style={{ width:"100%", background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"13px 40px 13px 14px", color:S.text, fontSize:16, outline:"none", fontFamily:S.mono, boxSizing:"border-box", transition:"border-color 0.2s" }}
+                onFocus={e => e.target.style.borderColor = S.greenMid}
+                onBlur={e  => e.target.style.borderColor = S.border2}
+              />
+              <span onClick={() => setShowPwd(p => !p)}
+                style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", cursor:"pointer", color:S.greenMid, fontSize:14, userSelect:"none" }}>
+                {showPwd ? "🙈" : "👁"}
+              </span>
+            </div>
           </div>
 
           {/* Error / Success */}

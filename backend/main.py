@@ -9,12 +9,12 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from contextvars import ContextVar
 from typing import Optional
 
 # ── Third-party imports ───────────────────────────────────────────────────────
 import bcrypt
 import boto3
+from cryptography.fernet import Fernet
 from botocore.exceptions import ClientError, NoCredentialsError
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
@@ -43,20 +43,21 @@ app.add_middleware(
 
 # ── AWS clients ───────────────────────────────────────────────────────────────
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
-current_region: ContextVar[str] = ContextVar("current_region", default=AWS_REGION)
 
-def get_ec2():
+def get_ec2(region=None, access_key=None, secret_key=None):
     return boto3.client(
-        "ec2", region_name=current_region.get(),
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        "ec2",
+        region_name=region or os.getenv("AWS_REGION", "ap-south-1"),
+        aws_access_key_id=access_key or os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=secret_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
-def get_cw():
+def get_cw(region=None, access_key=None, secret_key=None):
     return boto3.client(
-        "cloudwatch", region_name=current_region.get(),
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        "cloudwatch",
+        region_name=region or os.getenv("AWS_REGION", "ap-south-1"),
+        aws_access_key_id=access_key or os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=secret_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -71,8 +72,22 @@ _mongo       = MongoClient(MONGO_URI) if MONGO_URI else None
 db           = _mongo["cloudCommansCenter"] if _mongo is not None else None
 users_col    = db["users"] if db is not None else None
 
+accounts_col = db["aws_accounts"] if db is not None else None
+
 if users_col is not None:
     users_col.create_index("username", unique=True)
+if accounts_col is not None:
+    accounts_col.create_index([("username", 1), ("label", 1)])
+
+# Encryption for AWS credentials stored in Atlas
+ENCRYPT_KEY = os.getenv("ENCRYPT_KEY", Fernet.generate_key().decode())
+fernet = Fernet(ENCRYPT_KEY.encode() if isinstance(ENCRYPT_KEY, str) else ENCRYPT_KEY)
+
+def encrypt_val(val: str) -> str:
+    return fernet.encrypt(val.encode()).decode()
+
+def decrypt_val(val: str) -> str:
+    return fernet.decrypt(val.encode()).decode()
 
 bearer_scheme = HTTPBearer()
 
@@ -106,15 +121,41 @@ class ChatRequest(BaseModel):
     message: str
     history: list = []
     region: str = "ap-south-1"
+    account_id: str = ""
+    access_key: str = ""
+    secret_key: str = ""
+
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class ChangeUsernameRequest(BaseModel):
+    new_username: str
+    current_password: str
+
+class AWSAccountRequest(BaseModel):
+    label: str
+    access_key: str
+    secret_key: str
+    region: str = "ap-south-1"
+    account_id: str = ""
+
+class UpdateAWSAccountRequest(BaseModel):
+    label: str = ""
+    access_key: str = ""
+    secret_key: str = ""
+    region: str = ""
 
 class DirectToolRequest(BaseModel):
     tool: str
     args: dict = {}
     region: str = "ap-south-1"
-
-class AuthRequest(BaseModel):
-    username: str
-    password: str
+    access_key: str = ""
+    secret_key: str = ""
 
 # ── Tool definitions for Groq ─────────────────────────────────────────────────
 AWS_TOOLS = [
@@ -256,9 +297,9 @@ def parse_instance(inst: dict) -> dict:
     }
 
 # ── Tool implementations ──────────────────────────────────────────────────────
-def list_instances(state: Optional[str] = None) -> dict:
+def list_instances(state: Optional[str] = None, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        ec2 = get_ec2()
+        ec2 = get_ec2(region, access_key, secret_key)
         filters = []
         if state and state != "all":
             filters.append({"Name": "instance-state-name", "Values": [state]})
@@ -271,9 +312,9 @@ def list_instances(state: Optional[str] = None) -> dict:
         raise HTTPException(500, f"AWS Error: {e.response['Error']['Message']}")
 
 
-def get_instance_by_name(name: str) -> dict:
+def get_instance_by_name(name: str, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        ec2 = get_ec2()
+        ec2 = get_ec2(region, access_key, secret_key)
         resp = ec2.describe_instances(Filters=[{"Name": "tag:Name", "Values": [name]}])
         for r in resp["Reservations"]:
             for inst in r["Instances"]:
@@ -283,9 +324,9 @@ def get_instance_by_name(name: str) -> dict:
         raise HTTPException(500, f"AWS Error: {e.response['Error']['Message']}")
 
 
-def get_cpu_metrics(instance_id: str, hours: float = 1) -> dict:
+def get_cpu_metrics(instance_id: str, hours: float = 1, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        cw = get_cw()
+        cw = get_cw(region, access_key, secret_key)
         end = datetime.utcnow()
         start = end - timedelta(hours=hours)
         resp = cw.get_metric_statistics(
@@ -313,20 +354,20 @@ def get_cpu_metrics(instance_id: str, hours: float = 1) -> dict:
         raise HTTPException(500, f"AWS Error: {e.response['Error']['Message']}")
 
 
-def list_high_cpu_instances(threshold: float = 70) -> dict:
-    all_data = list_instances(state="running")
+def list_high_cpu_instances(threshold: float = 70, region=None, access_key=None, secret_key=None) -> dict:
+    all_data = list_instances(state="running", region=region, access_key=access_key, secret_key=secret_key)
     results = []
     for inst in all_data.get("instances", []):
-        metrics = get_cpu_metrics(inst["id"], hours=1)
+        metrics = get_cpu_metrics(inst["id"], hours=1, region=region, access_key=access_key, secret_key=secret_key)
         cpu = metrics.get("cpu_avg")
         if cpu is not None and cpu >= threshold:
             results.append({**inst, "cpu_avg": cpu})
     return {"threshold": threshold, "instances": results, "count": len(results)}
 
 
-def get_instance_status(instance_id: str) -> dict:
+def get_instance_status(instance_id: str, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        ec2 = get_ec2()
+        ec2 = get_ec2(region, access_key, secret_key)
         resp = ec2.describe_instance_status(InstanceIds=[instance_id], IncludeAllInstances=True)
         statuses = resp.get("InstanceStatuses", [])
         if not statuses:
@@ -346,9 +387,9 @@ def get_instance_status(instance_id: str) -> dict:
         raise HTTPException(500, f"AWS Error: {e.response['Error']['Message']}")
 
 
-def list_security_groups(instance_id: Optional[str] = None) -> dict:
+def list_security_groups(instance_id: Optional[str] = None, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        ec2 = get_ec2()
+        ec2 = get_ec2(region, access_key, secret_key)
         if instance_id:
             resp = ec2.describe_instances(InstanceIds=[instance_id])
             sg_ids = [sg["GroupId"] for r in resp["Reservations"]
@@ -369,9 +410,9 @@ def list_security_groups(instance_id: Optional[str] = None) -> dict:
         raise HTTPException(500, f"AWS Error: {e.response['Error']['Message']}")
 
 
-def list_volumes(instance_id: Optional[str] = None) -> dict:
+def list_volumes(instance_id: Optional[str] = None, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        ec2 = get_ec2()
+        ec2 = get_ec2(region, access_key, secret_key)
         filters = [{"Name": "attachment.instance-id", "Values": [instance_id]}] if instance_id else []
         resp = ec2.describe_volumes(Filters=filters)
         volumes = []
@@ -391,9 +432,9 @@ def list_volumes(instance_id: Optional[str] = None) -> dict:
         raise HTTPException(500, f"AWS Error: {e.response['Error']['Message']}")
 
 
-def get_memory_metrics(instance_id: str, hours: float = 1) -> dict:
+def get_memory_metrics(instance_id: str, hours: float = 1, region=None, access_key=None, secret_key=None) -> dict:
     try:
-        cw = get_cw()
+        cw = get_cw(region, access_key, secret_key)
         end = datetime.utcnow()
         start = end - timedelta(hours=hours)
         resp = cw.get_metric_statistics(
@@ -416,21 +457,21 @@ def get_memory_metrics(instance_id: str, hours: float = 1) -> dict:
 
 
 # ── Tool dispatcher ───────────────────────────────────────────────────────────
-TOOL_MAP = {
-    "list_instances":          lambda a: list_instances(a.get("state")),
-    "get_instance_by_name":    lambda a: get_instance_by_name(a["name"]),
-    "get_cpu_metrics":         lambda a: get_cpu_metrics(a["instance_id"], a.get("hours", 1)),
-    "list_high_cpu_instances": lambda a: list_high_cpu_instances(a.get("threshold", 70)),
-    "get_instance_status":     lambda a: get_instance_status(a["instance_id"]),
-    "list_security_groups":    lambda a: list_security_groups(a.get("instance_id")),
-    "list_volumes":            lambda a: list_volumes(a.get("instance_id")),
-    "get_memory_metrics":      lambda a: get_memory_metrics(a["instance_id"], a.get("hours", 1)),
-}
-
-def run_tool(tool_name: str, args: dict) -> dict:
+def run_tool(tool_name: str, args: dict, region: str = None, access_key: str = None, secret_key: str = None) -> dict:
+    creds = dict(region=region, access_key=access_key, secret_key=secret_key)
+    TOOL_MAP = {
+        "list_instances":          lambda a: list_instances(a.get("state"), **creds),
+        "get_instance_by_name":    lambda a: get_instance_by_name(a["name"], **creds),
+        "get_cpu_metrics":         lambda a: get_cpu_metrics(a["instance_id"], a.get("hours", 1), **creds),
+        "list_high_cpu_instances": lambda a: list_high_cpu_instances(a.get("threshold", 70), **creds),
+        "get_instance_status":     lambda a: get_instance_status(a["instance_id"], **creds),
+        "list_security_groups":    lambda a: list_security_groups(a.get("instance_id"), **creds),
+        "list_volumes":            lambda a: list_volumes(a.get("instance_id"), **creds),
+        "get_memory_metrics":      lambda a: get_memory_metrics(a["instance_id"], a.get("hours", 1), **creds),
+    }
     if tool_name not in TOOL_MAP:
         return {"error": f"Unknown tool: {tool_name}"}
-    logger.info(f"Tool: {tool_name} | Args: {args}")
+    logger.info(f"Tool: {tool_name} | Args: {args} | Region: {region}")
     return TOOL_MAP[tool_name](args)
 
 
@@ -499,8 +540,6 @@ def me(username: str = Depends(get_current_user)):
 
 @app.post("/chat")
 async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
-    # Set region from request so all Boto3 calls use it
-    current_region.set(req.region)
     system_msg = {
         "role": "system",
         "content": (
@@ -547,36 +586,145 @@ async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
         for tc in assistant_msg.tool_calls:
             fn_name = tc.function.name
             fn_args = json.loads(tc.function.arguments or "{}")
-            result = run_tool(fn_name, fn_args)
+            result = run_tool(fn_name, fn_args, region=req.region)
             tool_calls_log.append({"tool": fn_name, "args": fn_args, "result": result})
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result)})
 
     return {"reply": "Reached max tool call limit.", "tool_calls": tool_calls_log}
 
 
-@app.get("/regions")
-def list_regions(username: str = Depends(get_current_user)):
-    try:
-        ec2 = boto3.client("ec2", region_name="us-east-1",
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))
-        resp = ec2.describe_regions(AllRegions=False)
-        regions = sorted([r["RegionName"] for r in resp["Regions"]])
-        return {"regions": regions}
-    except Exception:
-        return {"regions": [
-            "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
-            "ap-southeast-3","ap-northeast-1","ap-northeast-2","ap-northeast-3",
-            "us-east-1","us-east-2","us-west-1","us-west-2",
-            "eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-central-2",
-            "eu-north-1","ca-central-1","sa-east-1","af-south-1","me-south-1"
-        ]}
-
-
 @app.post("/tool")
 def direct_tool(req: DirectToolRequest, username: str = Depends(get_current_user)):
-    current_region.set(req.region)
-    return run_tool(req.tool, req.args)
+    ak = req.access_key if req.access_key else os.getenv("AWS_ACCESS_KEY_ID")
+    sk = req.secret_key if req.secret_key else os.getenv("AWS_SECRET_ACCESS_KEY")
+    return run_tool(req.tool, req.args, region=req.region, access_key=ak, secret_key=sk)
+
+
+
+# ── AWS Account routes ────────────────────────────────────────────────────────
+@app.post("/accounts/add")
+def add_account(req: AWSAccountRequest, username: str = Depends(get_current_user)):
+    if accounts_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    # Test credentials before saving
+    try:
+        sts = boto3.client("sts",
+            aws_access_key_id=req.access_key,
+            aws_secret_access_key=req.secret_key)
+        identity = sts.get_caller_identity()
+        real_account_id = identity["Account"]
+    except Exception as e:
+        raise HTTPException(400, f"Invalid AWS credentials: {str(e)}")
+    doc = {
+        "username":   username,
+        "label":      req.label,
+        "access_key": encrypt_val(req.access_key),
+        "secret_key": encrypt_val(req.secret_key),
+        "region":     req.region,
+        "account_id": real_account_id,
+        "added_at":   datetime.utcnow(),
+    }
+    result = accounts_col.insert_one(doc)
+    return {"message": "Account added successfully", "id": str(result.inserted_id), "account_id": real_account_id}
+
+
+@app.get("/accounts")
+def get_accounts(username: str = Depends(get_current_user)):
+    if accounts_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    accounts = list(accounts_col.find({"username": username}, {"access_key": 0, "secret_key": 0}))
+    for a in accounts:
+        a["id"] = str(a.pop("_id"))
+    return {"accounts": accounts, "count": len(accounts)}
+
+
+@app.delete("/accounts/{account_id}")
+def delete_account(account_id: str, username: str = Depends(get_current_user)):
+    from bson import ObjectId
+    if accounts_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    result = accounts_col.delete_one({"_id": ObjectId(account_id), "username": username})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Account not found")
+    return {"message": "Account deleted"}
+
+
+@app.put("/accounts/{account_id}")
+def update_account(account_id: str, req: UpdateAWSAccountRequest, username: str = Depends(get_current_user)):
+    from bson import ObjectId
+    if accounts_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    updates = {}
+    if req.label:      updates["label"]  = req.label
+    if req.region:     updates["region"] = req.region
+    if req.access_key: updates["access_key"] = encrypt_val(req.access_key)
+    if req.secret_key: updates["secret_key"] = encrypt_val(req.secret_key)
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    accounts_col.update_one({"_id": ObjectId(account_id), "username": username}, {"$set": updates})
+    return {"message": "Account updated"}
+
+
+@app.post("/accounts/{account_id}/test")
+def test_account(account_id: str, username: str = Depends(get_current_user)):
+    from bson import ObjectId
+    if accounts_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    acc = accounts_col.find_one({"_id": ObjectId(account_id), "username": username})
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    try:
+        sts = boto3.client("sts",
+            aws_access_key_id=decrypt_val(acc["access_key"]),
+            aws_secret_access_key=decrypt_val(acc["secret_key"]))
+        identity = sts.get_caller_identity()
+        return {"valid": True, "account_id": identity["Account"], "arn": identity["Arn"]}
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
+
+
+# ── Profile routes ────────────────────────────────────────────────────────────
+@app.put("/profile/password")
+def change_password(req: ChangePasswordRequest, username: str = Depends(get_current_user)):
+    if users_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    user = users_col.find_one({"username": username})
+    if not user or not verify_password(req.current_password, user["password"]):
+        raise HTTPException(401, "Current password is incorrect")
+    if len(req.new_password) < 6:
+        raise HTTPException(400, "New password must be at least 6 characters")
+    users_col.update_one({"username": username}, {"$set": {"password": hash_password(req.new_password)}})
+    return {"message": "Password updated successfully"}
+
+
+@app.put("/profile/username")
+def change_username(req: ChangeUsernameRequest, username: str = Depends(get_current_user)):
+    if users_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    user = users_col.find_one({"username": username})
+    if not user or not verify_password(req.current_password, user["password"]):
+        raise HTTPException(401, "Password is incorrect")
+    new_username = req.new_username.strip().lower()
+    if len(new_username) < 3:
+        raise HTTPException(400, "Username must be at least 3 characters")
+    try:
+        users_col.update_one({"username": username}, {"$set": {"username": new_username}})
+        # also update accounts
+        if accounts_col is not None:
+            accounts_col.update_many({"username": username}, {"$set": {"username": new_username}})
+        new_token = create_token(new_username)
+        return {"message": "Username updated", "token": new_token, "username": new_username}
+    except DuplicateKeyError:
+        raise HTTPException(400, "Username already taken")
+
+
+@app.delete("/profile/credentials")
+def delete_aws_credentials(username: str = Depends(get_current_user)):
+    """Delete all AWS credentials for a user but keep the account"""
+    if accounts_col is None:
+        raise HTTPException(500, "MongoDB not configured")
+    result = accounts_col.delete_many({"username": username})
+    return {"message": f"Deleted {result.deleted_count} AWS account(s)", "deleted": result.deleted_count}
 
 
 @app.get("/instances")

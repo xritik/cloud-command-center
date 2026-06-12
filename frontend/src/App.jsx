@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 const GROQ_API_KEY = process.env.REACT_APP_GROQ_API_KEY || "";
 const BACKEND_URL  = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
+console.log("Groq Key:", GROQ_API_KEY);
 
 // ── Tool definitions for Groq function calling ──────────────────────────────
 const AWS_TOOLS = [
@@ -122,8 +123,49 @@ const AWS_TOOLS = [
   },
 ];
 
-// ── Real backend call ────────────────────────────────────────────────────────
+// ── All regions to query in parallel ─────────────────────────────────────────
+const ALL_REGIONS = [
+  "us-east-1","us-east-2","us-west-1","us-west-2",
+  "eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-north-1",
+  "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
+  "ap-northeast-1","ap-northeast-2","ap-northeast-3",
+  "ca-central-1","sa-east-1","af-south-1","me-south-1"
+];
+
+// ── Real backend call ─────────────────────────────────────────────────────────
 const callBackend = async (toolName, args, tok, region = "ap-south-1") => {
+  // All regions: query every region in parallel and merge results
+  if (region === "all-regions") {
+    const results = await Promise.allSettled(
+      ALL_REGIONS.map(r =>
+        fetch(`${BACKEND_URL}/tool`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
+          body: JSON.stringify({ tool: toolName, args, region: r }),
+        })
+          .then(res => res.ok ? res.json() : null)
+          .then(data => data ? { ...data, _region: r } : null)
+          .catch(() => null)
+      )
+    );
+    // Merge instance arrays from all regions
+    const merged = [];
+    let regionsWithData = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value?.instances?.length > 0) {
+        r.value.instances.forEach(inst => merged.push({ ...inst, queried_region: r.value._region }));
+        regionsWithData.push(r.value._region);
+      }
+    }
+    if (merged.length > 0) {
+      return { instances: merged, count: merged.length, regions_with_data: regionsWithData, regions_queried: ALL_REGIONS.length };
+    }
+    // For non-instance tools (security groups, volumes etc.) return first successful result
+    const first = results.find(r => r.status === "fulfilled" && r.value && !r.value.error);
+    return first?.value || { instances: [], count: 0, regions_queried: ALL_REGIONS.length, message: "No data found in any region" };
+  }
+
+  // Single region call
   const res = await fetch(`${BACKEND_URL}/tool`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
@@ -450,7 +492,7 @@ const FormattedText = ({ text }) => {
 };
 
 // ── App ──────────────────────────────────────────────────────────────────────
-export default function App({ token, username, onLogout }) {
+export default function App({ token, username, onLogout, onProfile }) {
   const [messages, setMessages]       = useState([]);
   const [input, setInput]             = useState("");
   const [loading, setLoading]         = useState(false);
@@ -461,6 +503,7 @@ export default function App({ token, username, onLogout }) {
   const [awsStatus, setAwsStatus]     = useState(null);
   const [region, setRegion]           = useState("ap-south-1");
   const [regions, setRegions]         = useState([
+    "all-regions",
     "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
     "ap-northeast-1","ap-northeast-2","ap-northeast-3",
     "us-east-1","us-east-2","us-west-1","us-west-2",
@@ -483,7 +526,7 @@ export default function App({ token, username, onLogout }) {
         headers: { "Authorization": `Bearer ${token}` }
       })
         .then(r => r.json())
-        .then(data => { if (data.regions) setRegions(data.regions); })
+        .then(data => { if (data.regions) setRegions(["all-regions", ...data.regions]); })
         .catch(() => {});
     }
   }, []);
@@ -492,7 +535,6 @@ export default function App({ token, username, onLogout }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  // Track mobile vs desktop
   useEffect(() => {
     const handleResize = () => {
       const mobile = window.innerWidth < 768;
@@ -515,10 +557,14 @@ export default function App({ token, username, onLogout }) {
     setMessages(prev => [...prev, { type: "user", text: userText }]);
 
     // Always keep system prompt in sync with selected region
+    const regionLabel = region === "all-regions"
+      ? `ALL AWS regions simultaneously (${ALL_REGIONS.length} regions in parallel)`
+      : `AWS region: ${region}`;
     const systemPrompt = {
       role: "system",
       content: `You are an AWS Infrastructure Assistant powered by Groq and Boto3.
-    You are currently querying AWS region: ${region}.
+    You are currently querying ${regionLabel}.
+    ${region === "all-regions" ? `When asked which region, say you are querying all ${ALL_REGIONS.length} AWS regions in parallel.` : ""}
     Answer questions about EC2 instances, CloudWatch metrics, security groups, and EBS volumes.
     Always use the provided tools to fetch live data. Be concise and precise.
     When listing instances, always show them in a clear structured way.
@@ -597,27 +643,8 @@ export default function App({ token, username, onLogout }) {
   return (
     <div style={{ display:"flex", height:"100vh", background:S.bg, fontFamily:S.mono, color:S.textMid, overflow:"hidden" }}>
 
-      {/* ── Sidebar overlay backdrop on mobile ── */}
-      {isMobile && sidebarOpen && (
-        <div onClick={() => setSidebarOpen(false)}
-          style={{ position:"fixed", inset:0, background:"#00000088", zIndex:10 }} />
-      )}
-
       {/* ── Sidebar ── */}
-      <div style={{
-        width: sidebarOpen ? 262 : 0,
-        minWidth: sidebarOpen ? 262 : 0,
-        transition: "all 0.25s",
-        overflow: "hidden",
-        borderRight: `1px solid ${S.border}`,
-        background: S.bgPanel,
-        display: "flex",
-        flexDirection: "column",
-        flexShrink: 0,
-        ...(isMobile && sidebarOpen ? {
-          position: "fixed", top: 0, left: 0, height: "100vh", zIndex: 11, width: 262, minWidth: 262
-        } : {})
-      }}>
+      <div style={{ width:sidebarOpen?262:0, minWidth:sidebarOpen?262:0, transition:"all 0.25s", overflow:"hidden", borderRight:`1px solid ${S.border}`, background:S.bgPanel, display:"flex", flexDirection:"column", flexShrink:0 }}>
 
         {/* Logo */}
         <div style={{ padding:"18px 16px 14px", borderBottom:`1px solid ${S.border}` }}>
@@ -629,7 +656,7 @@ export default function App({ token, username, onLogout }) {
               : <span style={{ color:S.red }}>● Not connected</span>}
           </div>
           <div style={{ fontSize:10, color:S.greenMid, marginTop:4 }}>
-            Region: <span style={{ color:S.green }}>{region}</span>
+            Region: <span style={{ color:S.green }}>{region === "all-regions" ? "All Regions" : region}</span>
           </div>
           <div style={{ fontSize:10, color:S.greenMid, marginTop:6, display:"flex", alignItems:"center", gap:5 }}>
             <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
@@ -681,49 +708,51 @@ export default function App({ token, username, onLogout }) {
 
         {/* Header */}
         <div style={{ padding:"10px 18px", borderBottom:`1px solid ${S.border}`, display:"flex", alignItems:"center", gap:10, background:S.bgPanel, flexShrink:0 }}>
-          <button onClick={() => setSidebarOpen(o => !o)} style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"5px 9px", cursor:"pointer", color:S.greenDim, fontSize:13, fontFamily:S.mono, flexShrink:0 }}>☰</button>
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize: isMobile ? 9 : 11, color:S.green, fontWeight:700, letterSpacing: isMobile ? 1 : 2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-              {isMobile ? "CLOUD CMD CENTER" : "CLOUD COMMAND CENTER PLATFORM"}
-            </div>
-            {!isMobile && <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Groq LLaMA-3 → Boto3 → AWS</div>}
+          <button onClick={() => setSidebarOpen(o => !o)} style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"5px 9px", cursor:"pointer", color:S.greenDim, fontSize:13, fontFamily:S.mono }}>☰</button>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:11, color:S.green, fontWeight:700, letterSpacing:2 }}>CLOUD COMMAND CENTER PLATFORM</div>
+            <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Groq LLaMA-3 → Boto3 → AWS</div>
           </div>
-          <div style={{ display:"flex", gap: isMobile ? 6 : 8, alignItems:"center", flexShrink:0 }}>
-            {/* Hide service badges on mobile */}
-            {!isMobile && ["EC2","CloudWatch","STS"].map(s => (
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            {["EC2","CloudWatch","STS"].map(s => (
               <span key={s} style={{ fontSize:10, padding:"3px 8px", border:`1px solid ${S.greenFade}`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>{s}</span>
             ))}
-            {!isMobile && <div style={{ width:1, height:20, background:S.border2 }} />}
-            {/* Region dropdown — compact on mobile */}
+            <div style={{ width:1, height:20, background:S.border2 }} />
             <select
               value={region}
               onChange={e => setRegion(e.target.value)}
-              style={{ background:"#070f0a", border:`1px solid ${S.border2}`, borderRadius:6, padding: isMobile ? "4px 6px" : "4px 10px", color:S.greenDim, fontSize: isMobile ? 9 : 10, fontFamily:S.mono, cursor:"pointer", outline:"none", letterSpacing:1, maxWidth: isMobile ? 110 : "none", transition:"border-color 0.2s" }}
+              style={{ background:"#070f0a", border:`1px solid ${S.border2}`, borderRadius:6, padding:"4px 10px", color:S.greenDim, fontSize:10, fontFamily:S.mono, cursor:"pointer", outline:"none", letterSpacing:1, transition:"border-color 0.2s" }}
               onFocus={e => e.target.style.borderColor=S.greenMid}
               onBlur={e  => e.target.style.borderColor=S.border2}>
               {regions.map(r => (
-                <option key={r} value={r} style={{ background:"#040d07", color:S.textMid }}>{r}</option>
+                <option key={r} value={r} style={{ background:"#040d07", color: r === "all-regions" ? S.green : S.textMid, fontWeight: r === "all-regions" ? 700 : 400 }}>{r === "all-regions" ? "★ All Regions" : r}</option>
               ))}
             </select>
             <button onClick={clearChat} title="Clear chat"
-              style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
+              style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, marginLeft:4, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#4ade8022"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.green; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.color=S.greenDim; e.currentTarget.style.borderColor=S.greenDim; }}>
-              {isMobile ? "CLR" : "CLEAR"}
+              CLEAR
             </button>
-            {!isMobile && <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />}
-            {!isMobile && <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>}
+            <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />
+            <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>
+            <button onClick={onProfile} title="Profile"
+              style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
+              onMouseEnter={e => { e.currentTarget.style.background="#0a1f12"; e.currentTarget.style.borderColor=S.greenMid; }}
+              onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.borderColor=S.border2; }}>
+              PROFILE
+            </button>
             <button onClick={onLogout} title="Logout"
               style={{ background:"none", border:`1px solid #4a1525`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:"#ff4d6d", fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#1a0509"; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; }}>
-              {isMobile ? "↩" : "LOGOUT"}
+              LOGOUT
             </button>
           </div>
         </div>
 
         {/* Messages */}
-        <div style={{ flex:1, overflowY:"auto", padding: isMobile ? "12px 12px" : "20px 24px" }}>
+        <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
           {messages.length === 0 && (
             <div style={{ textAlign:"center", marginTop:80, color:S.textFaint }}>
               <div style={{ fontSize:40, marginBottom:16, opacity:0.15 }}>⬡</div>
@@ -735,7 +764,7 @@ export default function App({ token, username, onLogout }) {
           {messages.map((msg, i) => (
             <div key={i} style={{ marginBottom:20, display:"flex", flexDirection:"column", alignItems: msg.type==="user" ? "flex-end" : "flex-start" }}>
               {msg.type === "user" && (
-                <div style={{ maxWidth: isMobile ? "92%" : "65%", background:"#0a1f12", border:`1px solid ${S.greenFade}`, borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize: isMobile ? 12 : 13, color:S.text, lineHeight:1.6 }}>
+                <div style={{ maxWidth:"65%", background:"#0a1f12", border:`1px solid ${S.greenFade}`, borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize:13, color:S.text, lineHeight:1.6 }}>
                   {msg.text}
                 </div>
               )}
@@ -783,7 +812,7 @@ export default function App({ token, username, onLogout }) {
         </div>
 
         {/* Input bar */}
-        <div style={{ padding: isMobile ? "10px 12px" : "14px 20px", borderTop:`1px solid ${S.border}`, background:S.bgPanel, flexShrink:0 }}>
+        <div style={{ padding:"14px 20px", borderTop:`1px solid ${S.border}`, background:S.bgPanel, flexShrink:0 }}>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             <span style={{ color:S.textFaint, fontSize:13, userSelect:"none" }}>$</span>
             <input
@@ -803,7 +832,9 @@ export default function App({ token, username, onLogout }) {
               {loading ? <Dots /> : "RUN"}
             </button>
           </div>
-          {!isMobile && <div style={{ marginTop:7, fontSize:10, color:S.border2 }}>Enter to send · Shift+Enter for newline · Backend: {BACKEND_URL}</div>}
+          <div style={{ marginTop:7, fontSize:10, color:S.border2 }}>
+            Enter to send · Shift+Enter for newline · Backend: {BACKEND_URL}
+          </div>
         </div>
       </div>
 
@@ -818,9 +849,6 @@ export default function App({ token, username, onLogout }) {
         }
         button:not(:disabled):active { transform:scale(0.96); }
         input::placeholder { color: ${S.textFaint}; }
-        @media (max-width: 767px) {
-          select option { font-size: 12px; }
-        }
       `}</style>
     </div>
   );
