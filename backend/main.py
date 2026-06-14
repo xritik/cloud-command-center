@@ -485,6 +485,23 @@ def run_tool(tool_name: str, args: dict, region: str = None, access_key: str = N
 def root():
     return {"status": "ok", "service": "AWS Query Platform", "region": AWS_REGION}
 
+@app.get("/regions")
+def list_regions(username: str = Depends(get_current_user)):
+    try:
+        ec2 = boto3.client("ec2", region_name="us-east-1",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))
+        resp = ec2.describe_regions(AllRegions=False)
+        regions = sorted([r["RegionName"] for r in resp["Regions"]])
+        return {"regions": regions}
+    except Exception:
+        return {"regions": [
+            "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
+            "ap-northeast-1","ap-northeast-2","ap-northeast-3",
+            "us-east-1","us-east-2","us-west-1","us-west-2",
+            "eu-west-1","eu-west-2","eu-west-3","eu-central-1",
+            "ca-central-1","sa-east-1","af-south-1","me-south-1"
+        ]}
 
 @app.get("/health")
 def health():
