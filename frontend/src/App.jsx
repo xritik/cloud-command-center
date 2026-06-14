@@ -134,7 +134,36 @@ const ALL_REGIONS = [
 // ── Real backend call ─────────────────────────────────────────────────────────
 const callBackend = async (toolName, args, tok, regionsArr = ["ap-south-1"]) => {
   const regionList = Array.isArray(regionsArr) ? regionsArr : [regionsArr];
-  const region = regionList[0]; // used in single region path below
+
+  // Multiple regions: query in parallel and merge results
+  if (regionList.length > 1) {
+    const results = await Promise.allSettled(
+      regionList.map(r =>
+        fetch(`${BACKEND_URL}/tool`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
+          body: JSON.stringify({ tool: toolName, args, region: r }),
+        })
+          .then(res => res.ok ? res.json() : null)
+          .then(data => data ? { ...data, _region: r } : null)
+          .catch(() => null)
+      )
+    );
+    const merged = [];
+    const regionsWithData = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value?.instances?.length > 0) {
+        r.value.instances.forEach(inst => merged.push({ ...inst, queried_region: r.value._region }));
+        regionsWithData.push(r.value._region);
+      }
+    }
+    if (merged.length > 0) return { instances: merged, count: merged.length, regions_with_data: regionsWithData, regions_queried: regionList.length };
+    const first = results.find(r => r.status === "fulfilled" && r.value && !r.value.error);
+    return first?.value || { instances: [], count: 0, regions_queried: regionList.length, message: "No data found in selected regions" };
+  }
+
+  // Single region call
+  const region = regionList[0];
   // All regions: query every region in parallel and merge results
   if (region === "all-regions") {
     const results = await Promise.allSettled(
@@ -166,33 +195,6 @@ const callBackend = async (toolName, args, tok, regionsArr = ["ap-south-1"]) => 
     return first?.value || { instances: [], count: 0, regions_queried: ALL_REGIONS.length, message: "No data found in any region" };
   }
 
-  // Multi-region: query in parallel and merge
-  if (regionList.length > 1) {
-    const results = await Promise.allSettled(
-      regionList.map(r =>
-        fetch(`${BACKEND_URL}/tool`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
-          body: JSON.stringify({ tool: toolName, args, region: r }),
-        })
-          .then(res => res.ok ? res.json() : null)
-          .then(data => data ? { ...data, _region: r } : null)
-          .catch(() => null)
-      )
-    );
-    const merged = [];
-    const regionsWithData = [];
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value?.instances?.length > 0) {
-        r.value.instances.forEach(inst => merged.push({ ...inst, queried_region: r.value._region }));
-        regionsWithData.push(r.value._region);
-      }
-    }
-    if (merged.length > 0) return { instances: merged, count: merged.length, regions_with_data: regionsWithData, regions_queried: regionList.length };
-    const first = results.find(r => r.status === "fulfilled" && r.value && !r.value.error);
-    return first?.value || { instances: [], count: 0, regions_queried: regionList.length, message: "No data found in selected regions" };
-  }
-
   // Single region call
   const res = await fetch(`${BACKEND_URL}/tool`, {
     method: "POST",
@@ -219,8 +221,9 @@ const callGroq = async (messages, tools) => {
       messages,
       tools,
       tool_choice: "auto",
-      temperature: 0.1,
-      max_tokens: 2048,
+      parallel_tool_calls: false,
+      temperature: 0,
+      max_tokens: 4096,
     }),
   });
   if (!res.ok) {
@@ -520,7 +523,7 @@ const FormattedText = ({ text }) => {
 };
 
 // ── App ──────────────────────────────────────────────────────────────────────
-export default function App({ token, username, onLogout }) {
+export default function App({ token, username, onLogout, onProfile }) {
   const [messages, setMessages]       = useState([]);
   const [input, setInput]             = useState("");
   const [loading, setLoading]         = useState(false);
@@ -529,14 +532,14 @@ export default function App({ token, username, onLogout }) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [awsStatus, setAwsStatus]     = useState(null);
   const [selectedRegions, setSelectedRegions] = useState(["ap-south-1"]);
-  const [regionDropOpen, setRegionDropOpen] = useState(false);
-  const [regions, setRegions]         = useState([
+  const [regions, setRegions]               = useState([
     "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
     "ap-northeast-1","ap-northeast-2","ap-northeast-3",
     "us-east-1","us-east-2","us-west-1","us-west-2",
     "eu-west-1","eu-west-2","eu-west-3","eu-central-1",
     "ca-central-1","sa-east-1","af-south-1","me-south-1"
   ]);
+  const [regionDropOpen, setRegionDropOpen] = useState(false);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
   // groqMessages holds the raw OpenAI-format conversation for the API
@@ -580,7 +583,8 @@ export default function App({ token, username, onLogout }) {
     setMessages(prev => [...prev, { type: "user", text: userText }]);
 
     // Always keep system prompt in sync with selected regions
-    const regionLabel = selectedRegions.length === regions.length
+    const isAll = selectedRegions.length === regions.length;
+    const regionLabel = isAll
       ? `ALL ${selectedRegions.length} AWS regions in parallel`
       : selectedRegions.length === 1
         ? `AWS region: ${selectedRegions[0]}`
@@ -596,15 +600,34 @@ export default function App({ token, username, onLogout }) {
     Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
     };
     if (groqConvRef.current.length === 0) {
+      // Pre-warm with system prompt + a silent starter exchange
+      // This prevents Groq tool-use failures on the very first cold query
       groqConvRef.current.push(systemPrompt);
+      groqConvRef.current.push({ role: "user", content: "Hello" });
+      groqConvRef.current.push({ role: "assistant", content: "Hello! I am your AWS Infrastructure Assistant. I can query your EC2 instances, CloudWatch metrics, security groups, and EBS volumes. What would you like to know?" });
     } else {
       groqConvRef.current[0] = systemPrompt;
     }
 
     groqConvRef.current.push({ role: "user", content: userText });
 
+    // Retry once on tool call failure
+    const callGroqWithRetry = async (messages, tools) => {
+      try {
+        const res = await callGroq(messages, tools);
+        if (res.choices[0].finish_reason === "tool_calls" || res.choices[0].message.tool_calls?.length > 0 || res.choices[0].message.content) {
+          return res;
+        }
+        throw new Error("Empty response");
+      } catch (e) {
+        // Wait 800ms then retry once
+        await new Promise(r => setTimeout(r, 800));
+        return callGroq(messages, tools);
+      }
+    };
+
     try {
-      let response = await callGroq(groqConvRef.current, AWS_TOOLS);
+      let response = await callGroqWithRetry(groqConvRef.current, AWS_TOOLS);
       let assistantMsg = response.choices[0].message;
       let toolResults = [];
 
@@ -745,6 +768,8 @@ export default function App({ token, username, onLogout }) {
               <span key={s} style={{ fontSize:10, padding:"3px 8px", border:`1px solid ${S.greenFade}`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>{s}</span>
             ))}
             <div style={{ width:1, height:20, background:S.border2 }} />
+
+            {/* ── Multi-region checkbox dropdown ── */}
             <div style={{ position:"relative" }} data-region-drop>
               <button onClick={() => setRegionDropOpen(o => !o)}
                 style={{ background:"#070f0a", border:`1px solid ${regionDropOpen ? S.greenMid : S.border2}`, borderRadius:6, padding:"4px 10px", color:S.greenDim, fontSize:10, fontFamily:S.mono, cursor:"pointer", outline:"none", letterSpacing:1, transition:"all 0.2s", display:"flex", alignItems:"center", gap:6, whiteSpace:"nowrap" }}>
@@ -752,23 +777,36 @@ export default function App({ token, username, onLogout }) {
                 {selectedRegions.length === regions.length ? "All Regions" : selectedRegions.length === 1 ? selectedRegions[0] : `${selectedRegions.length} Regions`}
                 <span style={{ fontSize:8, opacity:0.6 }}>{regionDropOpen ? "▲" : "▼"}</span>
               </button>
+
               {regionDropOpen && (
-                <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, background:S.bgPanel, border:`1px solid ${S.border2}`, borderRadius:10, padding:"8px 0", zIndex:100, minWidth:200, maxHeight:320, overflowY:"auto", boxShadow:"0 8px 32px #00000088" }}>
-                  <div style={{ display:"flex", gap:8, padding:"4px 12px 8px", borderBottom:`1px solid ${S.border}` }}>
-                    <span onClick={() => setSelectedRegions([...regions])} style={{ fontSize:10, color:S.green, cursor:"pointer", letterSpacing:1 }}>ALL</span>
-                    <span style={{ color:S.border2 }}>|</span>
-                    <span onClick={() => setSelectedRegions([regions[0]])} style={{ fontSize:10, color:S.greenMid, cursor:"pointer", letterSpacing:1 }}>RESET</span>
+                <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, background:S.bgPanel, border:`1px solid ${S.border2}`, borderRadius:10, padding:"8px 0", zIndex:200, minWidth:200, maxHeight:340, overflowY:"auto", boxShadow:"0 8px 32px #00000099" }}>
+                  {/* ALL / RESET controls */}
+                  <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 14px 10px", borderBottom:`1px solid ${S.border}` }}>
+                    <span onClick={() => setSelectedRegions([...regions])}
+                      style={{ fontSize:10, color:S.green, cursor:"pointer", letterSpacing:1, fontWeight:700, border:`1px solid ${S.border2}`, borderRadius:4, padding:"2px 8px" }}>
+                      ALL
+                    </span>
+                    <span onClick={() => setSelectedRegions(["ap-south-1"])}
+                      style={{ fontSize:10, color:S.greenMid, cursor:"pointer", letterSpacing:1, border:`1px solid ${S.border}`, borderRadius:4, padding:"2px 8px" }}>
+                      RESET
+                    </span>
                     <span style={{ flex:1 }} />
                     <span style={{ fontSize:10, color:S.textFaint }}>{selectedRegions.length}/{regions.length}</span>
                   </div>
+                  {/* Region list with checkboxes */}
                   {regions.map(r => (
-                    <label key={r} style={{ display:"flex", alignItems:"center", gap:10, padding:"6px 14px", cursor:"pointer", transition:"background 0.15s" }}
+                    <label key={r}
+                      style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 14px", cursor:"pointer", transition:"background 0.15s" }}
                       onMouseEnter={e => e.currentTarget.style.background="#0a1f12"}
                       onMouseLeave={e => e.currentTarget.style.background="transparent"}>
                       <input type="checkbox"
                         checked={selectedRegions.includes(r)}
-                        onChange={() => setSelectedRegions(prev => prev.includes(r) ? (prev.length > 1 ? prev.filter(x => x !== r) : prev) : [...prev, r])}
-                        style={{ accentColor:S.green, width:13, height:13, cursor:"pointer" }}
+                        onChange={() => setSelectedRegions(prev =>
+                          prev.includes(r)
+                            ? prev.length > 1 ? prev.filter(x => x !== r) : prev
+                            : [...prev, r]
+                        )}
+                        style={{ accentColor:S.green, width:13, height:13, cursor:"pointer", flexShrink:0 }}
                       />
                       <span style={{ fontSize:11, color: selectedRegions.includes(r) ? S.green : S.textMid, fontFamily:S.mono }}>{r}</span>
                     </label>
@@ -776,6 +814,7 @@ export default function App({ token, username, onLogout }) {
                 </div>
               )}
             </div>
+
             <button onClick={clearChat} title="Clear chat"
               style={{ background:"none", border:`1px solid ${S.greenDim}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, marginLeft:4, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#4ade8022"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.green; }}
@@ -784,6 +823,12 @@ export default function App({ token, username, onLogout }) {
             </button>
             <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />
             <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>
+            <button onClick={onProfile} title="Profile"
+              style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
+              onMouseEnter={e => { e.currentTarget.style.background="#0a1f12"; e.currentTarget.style.borderColor=S.greenMid; }}
+              onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.borderColor=S.border2; }}>
+              PROFILE
+            </button>
             <button onClick={onLogout} title="Logout"
               style={{ background:"none", border:`1px solid #4a1525`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:"#ff4d6d", fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#1a0509"; }}
