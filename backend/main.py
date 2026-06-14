@@ -60,7 +60,12 @@ def get_cw(region=None, access_key=None, secret_key=None):
         aws_secret_access_key=secret_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEYS = [
+    v for k, v in os.environ.items()
+    if k.startswith("GROQ_KEY_") and v.strip()
+]
+if not GROQ_API_KEYS:
+    GROQ_API_KEYS = [os.getenv("GROQ_API_KEY", "")]
 
 # ── MongoDB Atlas ─────────────────────────────────────────────────────────────
 MONGO_URI    = os.getenv("MONGO_URI")
@@ -553,14 +558,28 @@ async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
     tool_calls_log = []
 
     for _ in range(10):
-        response = groq_client.chat.completions.create(
-            model="llama3-groq-70b-8192-tool-use-preview",
-            messages=messages,
-            tools=AWS_TOOLS,
-            tool_choice="auto",
-            temperature=0.1,
-            max_tokens=2048,
-        )
+        response = None
+        last_error = None
+        for key in GROQ_API_KEYS:
+            try:
+                client = Groq(api_key=key)
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=messages,
+                    tools=AWS_TOOLS,
+                    tool_choice="auto",
+                    temperature=0,
+                    max_tokens=4096,
+                )
+                break  # key worked, stop trying
+            except Exception as e:
+                err_str = str(e).lower()
+                if "rate limit" in err_str or "quota" in err_str or "limit" in err_str:
+                    last_error = e
+                    continue  # try next key
+                raise  # non-rate-limit error, stop immediately
+        if response is None:
+            raise HTTPException(429, "All Groq API keys have reached their rate limit.")
         assistant_msg = response.choices[0].message
 
         if not assistant_msg.tool_calls:

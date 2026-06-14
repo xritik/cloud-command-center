@@ -1,6 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-const GROQ_API_KEY = process.env.REACT_APP_GROQ_API_KEY || "";
+const GROQ_API_KEYS = [
+  process.env.REACT_APP_GROQ_KEY_1 || "",
+  process.env.REACT_APP_GROQ_KEY_2 || "",
+  process.env.REACT_APP_GROQ_KEY_3 || "",
+  process.env.REACT_APP_GROQ_KEY_4 || "",
+  process.env.REACT_APP_GROQ_KEY_5 || "",
+  process.env.REACT_APP_GROQ_KEY_6 || "",
+  process.env.REACT_APP_GROQ_KEY_7 || "",
+].filter(Boolean);
 const BACKEND_URL  = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 
 // ── Tool definitions for Groq function calling ──────────────────────────────
@@ -210,27 +218,63 @@ const callBackend = async (toolName, args, tok, regionsArr = ["ap-south-1"]) => 
 
 // ── Groq API call ────────────────────────────────────────────────────────────
 const callGroq = async (messages, tools) => {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
-      messages,
-      tools,
-      tool_choice: "auto",
-      parallel_tool_calls: false,
-      temperature: 0,
-      max_tokens: 4096,
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Groq API error ${res.status}`);
+  for (let i = 0; i < GROQ_API_KEYS.length; i++) {
+    const apiKey = GROQ_API_KEYS[i];
+
+    try {
+      const res = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: "llama-3.3-70b-versatile",
+            messages,
+            tools,
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            temperature: 0,
+            max_tokens: 4096,
+          }),
+        }
+      );
+
+      if (res.ok) {
+        console.log(`Using API Key ${i + 1}`);
+        return await res.json();
+      }
+
+      const err = await res.json().catch(() => ({}));
+      const errMsg = err.error?.message || "";
+
+      const isRateLimit =
+        res.status === 429 ||
+        errMsg.toLowerCase().includes("rate limit") ||
+        errMsg.toLowerCase().includes("limit");
+
+      if (isRateLimit) {
+        console.warn(
+          `API Key ${i + 1} reached limit. Trying next key...`
+        );
+        continue;
+      }
+
+      console.error(`API Key ${i + 1} failed:`, errMsg);
+
+      // Skip invalid/dead key and continue
+      continue;
+    } catch (error) {
+      console.error(`API Key ${i + 1} network error:`, error);
+      continue;
+    }
   }
-  return res.json();
+
+  throw new Error(
+    "All configured Groq API keys are unavailable or have reached their limits."
+  );
 };
 
 // ── UI Components ────────────────────────────────────────────────────────────
