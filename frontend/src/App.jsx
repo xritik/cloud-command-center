@@ -656,34 +656,15 @@ export default function App({ token, username, onLogout, onProfile }) {
     Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
     };
     if (groqConvRef.current.length === 0) {
-      // Pre-warm with system prompt + a silent starter exchange
-      // This prevents Groq tool-use failures on the very first cold query
       groqConvRef.current.push(systemPrompt);
-      groqConvRef.current.push({ role: "user", content: "Hello" });
-      groqConvRef.current.push({ role: "assistant", content: "Hello! I am your AWS Infrastructure Assistant. I can query your EC2 instances, CloudWatch metrics, security groups, and EBS volumes. What would you like to know?" });
     } else {
       groqConvRef.current[0] = systemPrompt;
     }
 
     groqConvRef.current.push({ role: "user", content: userText });
 
-    // Retry once on tool call failure
-    const callGroqWithRetry = async (messages, tools) => {
-      try {
-        const res = await callGroq(messages, tools);
-        if (res.choices[0].finish_reason === "tool_calls" || res.choices[0].message.tool_calls?.length > 0 || res.choices[0].message.content) {
-          return res;
-        }
-        throw new Error("Empty response");
-      } catch (e) {
-        // Wait 800ms then retry once
-        await new Promise(r => setTimeout(r, 800));
-        return callGroq(messages, tools);
-      }
-    };
-
     try {
-      let response = await callGroqWithRetry(groqConvRef.current, AWS_TOOLS);
+      let response = await callGroq(groqConvRef.current, AWS_TOOLS);
       let assistantMsg = response.choices[0].message;
       let toolResults = [];
 
