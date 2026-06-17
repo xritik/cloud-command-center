@@ -1,15 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-const GROQ_API_KEYS = [
-  process.env.REACT_APP_GROQ_KEY_1 || "",
-  process.env.REACT_APP_GROQ_KEY_2 || "",
-  process.env.REACT_APP_GROQ_KEY_3 || "",
-  process.env.REACT_APP_GROQ_KEY_4 || "",
-  process.env.REACT_APP_GROQ_KEY_5 || "",
-  process.env.REACT_APP_GROQ_KEY_6 || "",
-  process.env.REACT_APP_GROQ_KEY_7 || "",
-].filter(Boolean);
-const BACKEND_URL  = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
+
+// ── Groq API keys ────────────────────────────────────────────────────────────
+// Add as many keys as you want in .env:
+//   REACT_APP_GROQ_KEY_1=gsk_...
+//   REACT_APP_GROQ_KEY_2=gsk_...
+//   REACT_APP_GROQ_KEY_3=gsk_...
+const GROQ_KEYS = Array.from({ length: 20 }, (_, i) =>
+  process.env[`REACT_APP_GROQ_KEY_${i + 1}`] || ""
+).filter(Boolean);
+
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL    = "llama-3.3-70b-versatile";
 
 // ── Tool definitions for Groq function calling ──────────────────────────────
 const AWS_TOOLS = [
@@ -216,65 +219,65 @@ const callBackend = async (toolName, args, tok, regionsArr = ["ap-south-1"]) => 
   return res.json();
 };
 
-// ── Groq API call ────────────────────────────────────────────────────────────
+// ── Groq API caller with key rotation ────────────────────────────────────────
+// Sticky pointer — remembers the last working key so the agentic loop
+// doesn't retry a rate-limited key on every iteration.
+let _groqKeyIdx = 0;
+
 const callGroq = async (messages, tools) => {
-  for (let i = 0; i < GROQ_API_KEYS.length; i++) {
-    const apiKey = GROQ_API_KEYS[i];
+  if (GROQ_KEYS.length === 0)
+    throw new Error("No Groq keys configured. Add REACT_APP_GROQ_KEY_1 to your .env file.");
+
+  for (let attempt = 0; attempt < GROQ_KEYS.length; attempt++) {
+    const idx    = (_groqKeyIdx + attempt) % GROQ_KEYS.length;
+    const apiKey = GROQ_KEYS[idx];
 
     try {
-      const res = await fetch(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: "llama-3.3-70b-versatile",
-            messages,
-            tools,
-            tool_choice: "auto",
-            parallel_tool_calls: false,
-            temperature: 0,
-            max_tokens: 4096,
-          }),
-        }
-      );
+      const res = await fetch(GROQ_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: GROQ_MODEL,
+          messages,
+          tools,
+          tool_choice: "auto",
+          parallel_tool_calls: false,
+          temperature: 0,
+          max_tokens: 4096,
+        }),
+      });
 
       if (res.ok) {
-        console.log(`Using API Key ${i + 1}`);
+        _groqKeyIdx = idx; // stick to this key for next call
+        console.log(`✓ Groq key ${idx + 1}/${GROQ_KEYS.length} succeeded`);
         return await res.json();
       }
 
-      const err = await res.json().catch(() => ({}));
-      const errMsg = err.error?.message || "";
+      const err    = await res.json().catch(() => ({}));
+      const errMsg = err.error?.message || `HTTP ${res.status}`;
+      const isLimit = res.status === 429
+        || errMsg.toLowerCase().includes("rate limit")
+        || errMsg.toLowerCase().includes("quota");
 
-      const isRateLimit =
-        res.status === 429 ||
-        errMsg.toLowerCase().includes("rate limit") ||
-        errMsg.toLowerCase().includes("limit");
-
-      if (isRateLimit) {
-        console.warn(
-          `API Key ${i + 1} reached limit. Trying next key...`
-        );
+      if (isLimit) {
+        console.warn(`Groq key ${idx + 1} rate-limited, trying next...`);
+        _groqKeyIdx = (idx + 1) % GROQ_KEYS.length;
         continue;
       }
 
-      console.error(`API Key ${i + 1} failed:`, errMsg);
-
-      // Skip invalid/dead key and continue
+      // Dead key (banned, invalid, etc.) — skip it, try next
+      console.warn(`Groq key ${idx + 1} skipped (${res.status}): ${errMsg}`);
+      _groqKeyIdx = (idx + 1) % GROQ_KEYS.length;
       continue;
-    } catch (error) {
-      console.error(`API Key ${i + 1} network error:`, error);
+
+    } catch (e) {
+      console.warn(`Groq key ${idx + 1} error: ${e.message}`);
+      _groqKeyIdx = (idx + 1) % GROQ_KEYS.length;
       continue;
     }
   }
 
-  throw new Error(
-    "All configured Groq API keys are unavailable or have reached their limits."
-  );
+  throw new Error("All Groq API keys failed. Remove banned/invalid keys and add fresh ones.");
 };
 
 // ── UI Components ────────────────────────────────────────────────────────────

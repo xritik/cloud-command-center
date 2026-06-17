@@ -60,12 +60,18 @@ def get_cw(region=None, access_key=None, secret_key=None):
         aws_secret_access_key=secret_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
-GROQ_API_KEYS = [
-    v for k, v in os.environ.items()
+# ── Groq API keys ────────────────────────────────────────────────────────────
+# Add as many keys as you want in .env:
+#   GROQ_KEY_1=gsk_...
+#   GROQ_KEY_2=gsk_...
+GROQ_KEYS = [
+    v for k, v in sorted(os.environ.items())
     if k.startswith("GROQ_KEY_") and v.strip()
 ]
-if not GROQ_API_KEYS:
-    GROQ_API_KEYS = [os.getenv("GROQ_API_KEY", "")]
+if not GROQ_KEYS and os.getenv("GROQ_API_KEY"):
+    GROQ_KEYS = [os.getenv("GROQ_API_KEY")]
+
+logger.info(f"Groq keys loaded: {len(GROQ_KEYS)}")
 
 # ── MongoDB Atlas ─────────────────────────────────────────────────────────────
 MONGO_URI    = os.getenv("MONGO_URI")
@@ -560,6 +566,45 @@ def me(username: str = Depends(get_current_user)):
     return {"username": username, "authenticated": True}
 
 
+# ── Groq LLM caller with sticky key rotation ─────────────────────────────────
+_groq_key_idx = 0  # remembers last working key across calls in the same session
+
+def call_llm_with_tools(messages: list, tools: list) -> object:
+    global _groq_key_idx
+    if not GROQ_KEYS:
+        raise HTTPException(503, "No Groq keys configured. Add GROQ_KEY_1 to your .env file.")
+
+    for attempt in range(len(GROQ_KEYS)):
+        idx = (_groq_key_idx + attempt) % len(GROQ_KEYS)
+        key = GROQ_KEYS[idx]
+        try:
+            client = Groq(api_key=key)
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                temperature=0,
+                max_tokens=4096,
+            )
+            _groq_key_idx = idx  # stick to this key for next call
+            logger.info(f"✓ Groq key {idx + 1}/{len(GROQ_KEYS)} succeeded")
+            return response
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(x in err_str for x in ["rate limit", "quota", "429"]):
+                logger.warning(f"Groq key {idx + 1} rate-limited, trying next...")
+                _groq_key_idx = (idx + 1) % len(GROQ_KEYS)
+                continue
+            # Dead/banned/invalid key — skip it, try next
+            logger.warning(f"Groq key {idx + 1} skipped: {str(e)[:100]}")
+            _groq_key_idx = (idx + 1) % len(GROQ_KEYS)
+            continue
+
+    raise HTTPException(429, "All Groq API keys are rate-limited. Add more keys or wait a minute.")
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
     system_msg = {
@@ -575,28 +620,7 @@ async def chat(req: ChatRequest, username: str = Depends(get_current_user)):
     tool_calls_log = []
 
     for _ in range(10):
-        response = None
-        last_error = None
-        for key in GROQ_API_KEYS:
-            try:
-                client = Groq(api_key=key)
-                response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=messages,
-                    tools=AWS_TOOLS,
-                    tool_choice="auto",
-                    temperature=0,
-                    max_tokens=4096,
-                )
-                break  # key worked, stop trying
-            except Exception as e:
-                err_str = str(e).lower()
-                if "rate limit" in err_str or "quota" in err_str or "limit" in err_str:
-                    last_error = e
-                    continue  # try next key
-                raise  # non-rate-limit error, stop immediately
-        if response is None:
-            raise HTTPException(429, "All Groq API keys have reached their rate limit.")
+        response = call_llm_with_tools(messages, AWS_TOOLS)
         assistant_msg = response.choices[0].message
 
         if not assistant_msg.tool_calls:
