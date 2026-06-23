@@ -1,7 +1,7 @@
 {
   "name": "aws-query-platform",
   "scripts": {
-    "start": "concurrently \"cd backend && uvicorn main:app --reload --port 8000\" \"npm start --prefix frontend\"",
+    "start": "concurrently \"cd backend && ..\\venv\\Scripts\\activate && uvicorn main:app --reload --port 8000\" \"npm start --prefix frontend\"",
     "install:all": "pip install -r backend/requirements.txt && npm install --prefix frontend"
   }
 }
