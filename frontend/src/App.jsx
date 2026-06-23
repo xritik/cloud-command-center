@@ -2,282 +2,23 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 
-// ── Groq API keys ────────────────────────────────────────────────────────────
-// Add as many keys as you want in .env:
-//   REACT_APP_GROQ_KEY_1=gsk_...
-//   REACT_APP_GROQ_KEY_2=gsk_...
-//   REACT_APP_GROQ_KEY_3=gsk_...
-const GROQ_KEYS = Array.from({ length: 20 }, (_, i) =>
-  process.env[`REACT_APP_GROQ_KEY_${i + 1}`] || ""
-).filter(Boolean);
+// ── Fully agentic architecture ────────────────────────────────────────────────
+// There is no fixed tool list anymore. Every query goes to the backend's
+// /agent route, where an LLM generates, validates, and safely executes
+// fresh Boto3 code for that specific question. See backend/agent.py.
 
-const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL    = "llama-3.3-70b-versatile";
-
-// ── Tool definitions for Groq function calling ──────────────────────────────
-const AWS_TOOLS = [
-  {
-    type: "function",
-    function: {
-      name: "list_instances",
-      description: "List all EC2 instances. Filter by state: running, stopped, pending, terminated, or all.",
-      parameters: {
-        type: "object",
-        properties: {
-          state: {
-            type: "string",
-            enum: ["running", "stopped", "pending", "terminated", "all"],
-            description: "Filter by instance state. Omit or use 'all' for every instance.",
-          },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_instance_by_name",
-      description: "Get full details of a specific EC2 instance by its Name tag.",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string", description: "Name tag value, e.g. 'Lab1'" },
-        },
-        required: ["name"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_cpu_metrics",
-      description: "Get average and max CPU utilization % for an instance over the last N hours.",
-      parameters: {
-        type: "object",
-        properties: {
-          instance_id: { type: "string", description: "EC2 instance ID, e.g. i-0abc123" },
-          hours: { type: "number", description: "Look-back window in hours. Default 1." },
-        },
-        required: ["instance_id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_high_cpu_instances",
-      description: "Return all running EC2 instances where CPU usage exceeds a threshold %.",
-      parameters: {
-        type: "object",
-        properties: {
-          threshold: { type: "number", description: "CPU % threshold, e.g. 70." },
-        },
-        required: ["threshold"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_instance_status",
-      description: "Get system and instance health / status checks for an EC2 instance.",
-      parameters: {
-        type: "object",
-        properties: {
-          instance_id: { type: "string", description: "EC2 instance ID" },
-        },
-        required: ["instance_id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_security_groups",
-      description: "List security groups with inbound/outbound rules. Optionally filter by instance.",
-      parameters: {
-        type: "object",
-        properties: {
-          instance_id: { type: "string", description: "Optional EC2 instance ID filter." },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_volumes",
-      description: "List EBS volumes. Optionally filter by instance.",
-      parameters: {
-        type: "object",
-        properties: {
-          instance_id: { type: "string", description: "Optional EC2 instance ID filter." },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_memory_metrics",
-      description: "Get memory utilization % for an instance (requires CloudWatch Agent installed).",
-      parameters: {
-        type: "object",
-        properties: {
-          instance_id: { type: "string", description: "EC2 instance ID" },
-          hours: { type: "number", description: "Look-back window. Default 1." },
-        },
-        required: ["instance_id"],
-      },
-    },
-  },
-];
-
-// ── All regions to query in parallel ─────────────────────────────────────────
-const ALL_REGIONS = [
-  "us-east-1","us-east-2","us-west-1","us-west-2",
-  "eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-north-1",
-  "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
-  "ap-northeast-1","ap-northeast-2","ap-northeast-3",
-  "ca-central-1","sa-east-1","af-south-1","me-south-1"
-];
-
-// ── Real backend call ─────────────────────────────────────────────────────────
-const callBackend = async (toolName, args, tok, regionsArr = ["ap-south-1"]) => {
-  const regionList = Array.isArray(regionsArr) ? regionsArr : [regionsArr];
-
-  // Multiple regions: query in parallel and merge results
-  if (regionList.length > 1) {
-    const results = await Promise.allSettled(
-      regionList.map(r =>
-        fetch(`${BACKEND_URL}/tool`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
-          body: JSON.stringify({ tool: toolName, args, region: r }),
-        })
-          .then(res => res.ok ? res.json() : null)
-          .then(data => data ? { ...data, _region: r } : null)
-          .catch(() => null)
-      )
-    );
-    const merged = [];
-    const regionsWithData = [];
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value?.instances?.length > 0) {
-        r.value.instances.forEach(inst => merged.push({ ...inst, queried_region: r.value._region }));
-        regionsWithData.push(r.value._region);
-      }
-    }
-    if (merged.length > 0) return { instances: merged, count: merged.length, regions_with_data: regionsWithData, regions_queried: regionList.length };
-    const first = results.find(r => r.status === "fulfilled" && r.value && !r.value.error);
-    return first?.value || { instances: [], count: 0, regions_queried: regionList.length, message: "No data found in selected regions" };
-  }
-
-  // Single region call
-  const region = regionList[0];
-  // All regions: query every region in parallel and merge results
-  if (region === "all-regions") {
-    const results = await Promise.allSettled(
-      ALL_REGIONS.map(r =>
-        fetch(`${BACKEND_URL}/tool`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
-          body: JSON.stringify({ tool: toolName, args, region: r }),
-        })
-          .then(res => res.ok ? res.json() : null)
-          .then(data => data ? { ...data, _region: r } : null)
-          .catch(() => null)
-      )
-    );
-    // Merge instance arrays from all regions
-    const merged = [];
-    let regionsWithData = [];
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value?.instances?.length > 0) {
-        r.value.instances.forEach(inst => merged.push({ ...inst, queried_region: r.value._region }));
-        regionsWithData.push(r.value._region);
-      }
-    }
-    if (merged.length > 0) {
-      return { instances: merged, count: merged.length, regions_with_data: regionsWithData, regions_queried: ALL_REGIONS.length };
-    }
-    // For non-instance tools (security groups, volumes etc.) return first successful result
-    const first = results.find(r => r.status === "fulfilled" && r.value && !r.value.error);
-    return first?.value || { instances: [], count: 0, regions_queried: ALL_REGIONS.length, message: "No data found in any region" };
-  }
-
-  // Single region call
-  const res = await fetch(`${BACKEND_URL}/tool`, {
+// ── Single agent call ─────────────────────────────────────────────────────────
+const callAgent = async (query, tok, region = "ap-south-1") => {
+  const res = await fetch(`${BACKEND_URL}/agent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
-    body: JSON.stringify({ tool: toolName, args, region }),
+    body: JSON.stringify({ query, region }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Backend error ${res.status}`);
+    throw new Error(err.detail || `Agent backend error ${res.status}`);
   }
   return res.json();
-};
-
-// ── Groq API caller with key rotation ────────────────────────────────────────
-// Sticky pointer — remembers the last working key so the agentic loop
-// doesn't retry a rate-limited key on every iteration.
-let _groqKeyIdx = 0;
-
-const callGroq = async (messages, tools) => {
-  if (GROQ_KEYS.length === 0)
-    throw new Error("No Groq keys configured. Add REACT_APP_GROQ_KEY_1 to your .env file.");
-
-  for (let attempt = 0; attempt < GROQ_KEYS.length; attempt++) {
-    const idx    = (_groqKeyIdx + attempt) % GROQ_KEYS.length;
-    const apiKey = GROQ_KEYS[idx];
-
-    try {
-      const res = await fetch(GROQ_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          messages,
-          tools,
-          tool_choice: "auto",
-          parallel_tool_calls: false,
-          temperature: 0,
-          max_tokens: 4096,
-        }),
-      });
-
-      if (res.ok) {
-        _groqKeyIdx = idx; // stick to this key for next call
-        console.log(`✓ Groq key ${idx + 1}/${GROQ_KEYS.length} succeeded`);
-        return await res.json();
-      }
-
-      const err    = await res.json().catch(() => ({}));
-      const errMsg = err.error?.message || `HTTP ${res.status}`;
-      const isLimit = res.status === 429
-        || errMsg.toLowerCase().includes("rate limit")
-        || errMsg.toLowerCase().includes("quota");
-
-      if (isLimit) {
-        console.warn(`Groq key ${idx + 1} rate-limited, trying next...`);
-        _groqKeyIdx = (idx + 1) % GROQ_KEYS.length;
-        continue;
-      }
-
-      // Dead key (banned, invalid, etc.) — skip it, try next
-      console.warn(`Groq key ${idx + 1} skipped (${res.status}): ${errMsg}`);
-      _groqKeyIdx = (idx + 1) % GROQ_KEYS.length;
-      continue;
-
-    } catch (e) {
-      console.warn(`Groq key ${idx + 1} error: ${e.message}`);
-      _groqKeyIdx = (idx + 1) % GROQ_KEYS.length;
-      continue;
-    }
-  }
-
-  throw new Error("All Groq API keys failed. Remove banned/invalid keys and add fresh ones.");
 };
 
 // ── UI Components ────────────────────────────────────────────────────────────
@@ -334,7 +75,7 @@ const KVGrid = ({ pairs }) => (
 );
 
 // Render tool result as rich table or card
-const ResultTable = ({ toolName, data }) => {
+const ResultTable = ({ data }) => {
   if (!data || typeof data !== "object")
     return <pre style={{ color:S.greenDim, fontSize:12, margin:0 }}>{JSON.stringify(data, null, 2)}</pre>;
 
@@ -574,7 +315,6 @@ export default function App({ token, username, onLogout, onProfile }) {
   const [messages, setMessages]       = useState([]);
   const [input, setInput]             = useState("");
   const [loading, setLoading]         = useState(false);
-  const [toolActivity, setToolActivity] = useState(null);
   const [history, setHistory]         = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile]       = useState(window.innerWidth < 768);
@@ -590,8 +330,6 @@ export default function App({ token, username, onLogout, onProfile }) {
   const [regionDropOpen, setRegionDropOpen] = useState(false);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
-  // groqMessages holds the raw OpenAI-format conversation for the API
-  const groqConvRef = useRef([]);
 
   // Check backend health + fetch regions on load
   useEffect(() => {
@@ -636,79 +374,30 @@ export default function App({ token, username, onLogout, onProfile }) {
     if (!userText || loading) return;
     setInput("");
     setLoading(true);
-    setToolActivity(null);
-
     // Append to display messages
     setMessages(prev => [...prev, { type: "user", text: userText }]);
 
-    // Always keep system prompt in sync with selected regions
-    const isAll = selectedRegions.length === regions.length;
-    const regionLabel = isAll
-      ? `ALL ${selectedRegions.length} AWS regions in parallel`
-      : selectedRegions.length === 1
-        ? `AWS region: ${selectedRegions[0]}`
-        : `${selectedRegions.length} AWS regions: ${selectedRegions.join(", ")}`;
-    const systemPrompt = {
-      role: "system",
-      content: `You are an AWS Infrastructure Assistant powered by Groq and Boto3.
-    You are currently querying ${regionLabel}.
-    When asked which region(s), say: ${regionLabel}.
-    Answer questions about EC2 instances, CloudWatch metrics, security groups, and EBS volumes.
-    Always use the provided tools to fetch live data. Be concise and precise.
-    When listing instances, always show them in a clear structured way.
-    Do NOT make up instance names, IDs, or IPs — use only what the tools return.`,
-    };
-    if (groqConvRef.current.length === 0) {
-      groqConvRef.current.push(systemPrompt);
-    } else {
-      groqConvRef.current[0] = systemPrompt;
-    }
-
-    groqConvRef.current.push({ role: "user", content: userText });
+    // Use the first selected region for the agent (it operates per-region,
+    // same as the backend's read-only Boto3 calls always have).
+    const region = selectedRegions[0] || "ap-south-1";
 
     try {
-      let response = await callGroq(groqConvRef.current, AWS_TOOLS);
-      let assistantMsg = response.choices[0].message;
-      let toolResults = [];
+      const agentResult = await callAgent(userText, token, region);
 
-      // Agentic loop: keep calling tools until LLM is done
-      while (assistantMsg.tool_calls?.length > 0) {
-        groqConvRef.current.push(assistantMsg);
+      const finalText = agentResult.reply
+        || (agentResult.error ? `I couldn't complete that query: ${agentResult.error}` : "Done.");
 
-        for (const call of assistantMsg.tool_calls) {
-          const fn   = call.function.name;
-          const args = JSON.parse(call.function.arguments || "{}");
-          setToolActivity({ name: fn, args });
-
-          let result;
-          try {
-            result = await callBackend(fn, args, token, selectedRegions);
-          } catch (e) {
-            result = { error: e.message };
-          }
-
-          toolResults.push({ toolName: fn, args, result });
-          groqConvRef.current.push({
-            role: "tool",
-            tool_call_id: call.id,
-            content: JSON.stringify(result),
-          });
-        }
-
-        response = await callGroq(groqConvRef.current, AWS_TOOLS);
-        assistantMsg = response.choices[0].message;
-      }
-
-      const finalText = assistantMsg.content || "Done.";
-      groqConvRef.current.push({ role: "assistant", content: finalText });
-
-      setMessages(prev => [...prev, { type: "assistant", text: finalText, toolResults }]);
-      setHistory(prev => [{ query: userText, time: new Date().toLocaleTimeString(), toolCount: toolResults.length }, ...prev.slice(0, 29)]);
+      setMessages(prev => [...prev, {
+        type: "assistant",
+        text: finalText,
+        generatedCode: agentResult.generated_code,
+        rawResult: agentResult.result,
+      }]);
+      setHistory(prev => [{ query: userText, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 29)]);
     } catch (err) {
       setMessages(prev => [...prev, { type: "error", text: `Error: ${err.message}` }]);
     } finally {
       setLoading(false);
-      setToolActivity(null);
       inputRef.current?.focus();
     }
   }, [input, loading, selectedRegions, token]);
@@ -719,12 +408,11 @@ export default function App({ token, username, onLogout, onProfile }) {
 
   const clearChat = () => {
     setMessages([]);
-    groqConvRef.current = [];
   };
 
-  // Reset conversation when region changes so system prompt reflects new region
+  // Reset displayed messages when region changes (each query is independent
+  // now, so there's no conversation state to carry across a region switch).
   useEffect(() => {
-    groqConvRef.current = [];
     setMessages([]);
   }, [selectedRegions]);
 
@@ -757,13 +445,8 @@ export default function App({ token, username, onLogout, onProfile }) {
           <div style={{ fontSize:18, color:S.green, fontWeight:700, letterSpacing:2 }}>CONSOLE</div>
           <div style={{ fontSize:10, color:S.textFaint, marginTop:4 }}>
             {awsStatus?.aws_connected
-              ? <span style={{ color:S.greenDim }}>● {awsStatus.account_id} · {awsStatus.arn?.split("/").pop()}</span>
+              ? <span style={{ color:S.greenDim }}>● Server connected</span>
               : <span style={{ color:S.red }}>● Not connected</span>}
-          </div>
-          <div style={{ fontSize:10, color:S.greenMid, marginTop:4 }}>
-            Region: <span style={{ color:S.green }}>
-              {selectedRegions.length === regions.length ? "All Regions" : selectedRegions.length === 1 ? selectedRegions[0] : `${selectedRegions.length} selected`}
-            </span>
           </div>
           <div style={{ fontSize:10, color:S.greenMid, marginTop:6, display:"flex", alignItems:"center", gap:5 }}>
             <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
@@ -794,7 +477,7 @@ export default function App({ token, username, onLogout, onProfile }) {
                   onMouseEnter={e => e.currentTarget.style.background="#0a1f12"}
                   onMouseLeave={e => e.currentTarget.style.background="transparent"}>
                   <div style={{ fontSize:11, color:S.textDim, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{h.query}</div>
-                  <div style={{ fontSize:10, color:S.textFaint, marginTop:2 }}>{h.time} · {h.toolCount} tool{h.toolCount!==1?"s":""}</div>
+                  <div style={{ fontSize:10, color:S.textFaint, marginTop:2 }}>{h.time}</div>
                 </div>
               ))}
             </>
@@ -805,7 +488,7 @@ export default function App({ token, username, onLogout, onProfile }) {
         <div style={{ padding:"10px 14px", borderTop:`1px solid ${S.border}`, fontSize:10, color:S.textFaint }}>
           <div style={{ display:"flex", alignItems:"center", gap:6 }}>
             <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
-            Groq · LLaMA-3 70B · Tool Use
+            Groq · LLaMA-3 70B · Agentic
           </div>
         </div>
       </div>
@@ -820,7 +503,7 @@ export default function App({ token, username, onLogout, onProfile }) {
             <div style={{ fontSize: isMobile ? 9 : 11, color:S.green, fontWeight:700, letterSpacing: isMobile ? 1 : 2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
               {isMobile ? "CMD CENTER" : "CLOUD COMMAND CENTER PLATFORM"}
             </div>
-            {!isMobile && <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Groq LLaMA-3 → Boto3 → AWS</div>}
+            {!isMobile && <div style={{ fontSize:10, color:S.textFaint }}>Natural language → Agent-generated Boto3 → AWS</div>}
           </div>
           <div style={{ display:"flex", gap: isMobile ? 5 : 8, alignItems:"center", flexShrink:0 }}>
             {!isMobile && ["EC2","CloudWatch","STS"].map(s => (
@@ -905,7 +588,7 @@ export default function App({ token, username, onLogout, onProfile }) {
             <div style={{ textAlign:"center", marginTop:80, color:S.textFaint }}>
               <div style={{ fontSize:40, marginBottom:16, opacity:0.15 }}>⬡</div>
               <div style={{ fontSize:13, marginBottom:6 }}>Ask anything about your AWS infrastructure</div>
-              <div style={{ fontSize:11, color:S.border2 }}>Groq LLaMA-3 · Function Calling · Live Boto3 Data</div>
+              <div style={{ fontSize:11, color:S.border2 }}>Fully Agentic · Live-generated Boto3 · Real AWS Data</div>
             </div>
           )}
 
@@ -921,22 +604,22 @@ export default function App({ token, username, onLogout, onProfile }) {
                 <div style={{ maxWidth:"96%", width:"100%" }}>
                   <div style={{ fontSize:9, color:S.textFaint, letterSpacing:2, marginBottom:6 }}>ASSISTANT</div>
 
-                  {/* Tool result cards */}
-                  {/* {msg.toolResults?.map((tr, j) => (
-                    <div key={j} style={{ background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:10, padding:"12px 16px", marginBottom:10 }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, flexWrap:"wrap" }}>
-                        <span style={{ fontSize:9, padding:"2px 8px", background:"#0a2a1a", border:`1px solid #1e5a3e`, borderRadius:4, color:S.greenDim, letterSpacing:1 }}>TOOL</span>
-                        <span style={{ fontSize:12, color:S.green, fontWeight:700 }}>{tr.toolName}()</span>
-                        <span style={{ fontSize:10, color:S.textFaint, wordBreak:"break-all" }}>{JSON.stringify(tr.args)}</span>
-                      </div>
-                      <ResultTable toolName={tr.toolName} data={tr.result} />
-                    </div>
-                  ))} */}
-
                   {/* LLM text response */}
                   <div style={{ background:S.bgCard, border:`1px solid ${S.border}`, borderRadius:"2px 12px 12px 12px", padding:"12px 16px", fontSize:13, color:S.textMid, lineHeight:1.75 }}>
                     <FormattedText text={msg.text} />
                   </div>
+
+                  {/* Raw agent result, rendered with the generic shape-based table when possible */}
+                  {msg.rawResult !== undefined && (
+                    <details style={{ marginTop:8 }}>
+                      <summary style={{ cursor:"pointer", fontSize:10, color:S.textFaint, letterSpacing:1 }}>
+                        VIEW RAW RESULT
+                      </summary>
+                      <div style={{ background:S.bgCard, border:`1px solid ${S.border2}`, borderRadius:8, padding:"10px 14px", marginTop:6 }}>
+                        <ResultTable data={msg.rawResult} />
+                      </div>
+                    </details>
+                  )}
                 </div>
               )}
 
