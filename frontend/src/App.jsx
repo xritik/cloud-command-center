@@ -8,11 +8,15 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000"
 // fresh Boto3 code for that specific question. See backend/agent.py.
 
 // ── Single agent call ─────────────────────────────────────────────────────────
-const callAgent = async (query, tok, region = "ap-south-1") => {
+const callAgent = async (query, tok, region = "ap-south-1", account = null) => {
   const res = await fetch(`${BACKEND_URL}/agent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tok}` },
-    body: JSON.stringify({ query, region }),
+    body: JSON.stringify({
+      query,
+      region,
+      account_id: account?.id || "",
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -315,9 +319,13 @@ export default function App({ token, username, onLogout, onProfile }) {
   const [messages, setMessages]       = useState([]);
   const [input, setInput]             = useState("");
   const [loading, setLoading]         = useState(false);
+  const [toolActivity, setToolActivity] = useState(null);
   const [history, setHistory]         = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile]       = useState(window.innerWidth < 768);
+  const [accounts, setAccounts]       = useState([]);
+  const [accountsLoading, setAccountsLoading] = useState(true);
+  const [activeAccount, setActiveAccount] = useState(null);
   const [awsStatus, setAwsStatus]     = useState(null);
   const [selectedRegions, setSelectedRegions] = useState(["ap-south-1"]);
   const [regions, setRegions]               = useState([
@@ -337,6 +345,20 @@ export default function App({ token, username, onLogout, onProfile }) {
       .then(r => r.json())
       .then(d => setAwsStatus(d))
       .catch(() => setAwsStatus({ aws_connected: false, error: "Backend unreachable" }));
+
+    // Fetch saved AWS accounts and auto-select first one
+    fetch(`${BACKEND_URL}/accounts`, {
+      headers: { "Authorization": `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.accounts?.length > 0) {
+          setAccounts(data.accounts);
+          setActiveAccount(data.accounts[0]);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setAccountsLoading(false));
     if (token) {
       fetch(`${BACKEND_URL}/regions`, {
         headers: { "Authorization": `Bearer ${token}` }
@@ -371,9 +393,11 @@ export default function App({ token, username, onLogout, onProfile }) {
 
   const sendMessage = useCallback(async (text) => {
     const userText = (text || input).trim();
-    if (!userText || loading) return;
+    if (!userText || loading || accountsLoading) return;
     setInput("");
     setLoading(true);
+    setToolActivity({ name: "agent", args: { query: userText } });
+
     // Append to display messages
     setMessages(prev => [...prev, { type: "user", text: userText }]);
 
@@ -382,7 +406,7 @@ export default function App({ token, username, onLogout, onProfile }) {
     const region = selectedRegions[0] || "ap-south-1";
 
     try {
-      const agentResult = await callAgent(userText, token, region);
+      const agentResult = await callAgent(userText, token, region, activeAccount);
 
       const finalText = agentResult.reply
         || (agentResult.error ? `I couldn't complete that query: ${agentResult.error}` : "Done.");
@@ -398,9 +422,10 @@ export default function App({ token, username, onLogout, onProfile }) {
       setMessages(prev => [...prev, { type: "error", text: `Error: ${err.message}` }]);
     } finally {
       setLoading(false);
+      setToolActivity(null);
       inputRef.current?.focus();
     }
-  }, [input, loading, selectedRegions, token]);
+  }, [input, loading, selectedRegions, token, activeAccount, accountsLoading]);
 
   const handleKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -441,25 +466,46 @@ export default function App({ token, username, onLogout, onProfile }) {
 
         {/* Logo */}
         <div style={{ padding:"18px 16px 14px", borderBottom:`1px solid ${S.border}` }}>
-          <div style={{ fontSize:9, color:S.textFaint, letterSpacing:3, marginBottom:3 }}>CLOUD COMMAND CENTER</div>
+          {/* <div style={{ fontSize:9, color:S.textFaint, letterSpacing:3, marginBottom:3 }}>CLOUD COMMAND CENTER</div> */}
           <div style={{ fontSize:18, color:S.green, fontWeight:700, letterSpacing:2 }}>CONSOLE</div>
           <div style={{ fontSize:10, color:S.textFaint, marginTop:4 }}>
             {awsStatus?.aws_connected
               ? <span style={{ color:S.greenDim }}>● Server connected</span>
+              // ? <span style={{ color:S.greenDim }}>● Backend connected · {awsStatus.groq_keys} LLM key{awsStatus.groq_keys !== 1 ? "s" : ""}</span>
               : <span style={{ color:S.red }}>● Not connected</span>}
           </div>
-          <div style={{ fontSize:10, color:S.greenMid, marginTop:6, display:"flex", alignItems:"center", gap:5 }}>
+          {/* <div style={{ fontSize:10, color:S.greenMid, marginTop:4 }}>
+            Region: <span style={{ color:S.green }}>
+              {selectedRegions.length === regions.length ? "All Regions" : selectedRegions.length === 1 ? selectedRegions[0] : `${selectedRegions.length} selected`}
+            </span>
+          </div> */}
+          {/* <div style={{ fontSize:10, color:S.greenMid, marginTop:6, display:"flex", alignItems:"center", gap:5 }}>
             <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
             Logged in as <strong style={{ color:S.green }}>{username}</strong>
-          </div>
+          </div> */}
+          {activeAccount && (
+            <div style={{ fontSize:10, color:S.greenMid, marginTop:6 }}>
+              AWS: <span style={{ color:S.green }}>{activeAccount.label}</span>
+              {accounts.length > 1 && (
+                <select
+                  value={activeAccount.id}
+                  onChange={e => setActiveAccount(accounts.find(a => a.id === e.target.value))}
+                  style={{ marginLeft:6, background:S.bgCard, border:`1px solid ${S.border}`, borderRadius:4, color:S.greenDim, fontSize:9, fontFamily:S.mono, cursor:"pointer", outline:"none" }}>
+                  {accounts.map(a => (
+                    <option key={a.id} value={a.id} style={{ background:S.bgCard }}>{a.label}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Quick queries */}
         <div style={{ padding:"14px 12px 8px" }}>
           <div style={{ fontSize:9, color:S.textFaint, letterSpacing:2, marginBottom:10 }}>QUICK QUERIES</div>
           {SUGGESTIONS.map(s => (
-            <button key={s} onClick={() => sendMessage(s)} disabled={loading}
-              style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:`1px solid ${S.border}`, borderRadius:6, padding:"7px 10px", color:S.textDim, fontSize:11, cursor:"pointer", marginBottom:4, transition:"all 0.15s", fontFamily:S.mono, opacity:loading?0.5:1 }}
+            <button key={s} onClick={() => sendMessage(s)} disabled={loading || accountsLoading}
+              style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:`1px solid ${S.border}`, borderRadius:6, padding:"7px 10px", color:S.textDim, fontSize:11, cursor:"pointer", marginBottom:4, transition:"all 0.15s", fontFamily:S.mono, opacity:(loading||accountsLoading)?0.5:1 }}
               onMouseEnter={e => { e.currentTarget.style.background="#0a1f12"; e.currentTarget.style.color=S.green; e.currentTarget.style.borderColor=S.greenFade; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.color=S.textDim; e.currentTarget.style.borderColor=S.border; }}>
               {s}
@@ -477,7 +523,7 @@ export default function App({ token, username, onLogout, onProfile }) {
                   onMouseEnter={e => e.currentTarget.style.background="#0a1f12"}
                   onMouseLeave={e => e.currentTarget.style.background="transparent"}>
                   <div style={{ fontSize:11, color:S.textDim, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{h.query}</div>
-                  <div style={{ fontSize:10, color:S.textFaint, marginTop:2 }}>{h.time}</div>
+                  <div style={{ fontSize:10, color:S.textFaint, marginTop:2 }}>{h.time} · {h.toolCount} tool{h.toolCount!==1?"s":""}</div>
                 </div>
               ))}
             </>
@@ -488,7 +534,7 @@ export default function App({ token, username, onLogout, onProfile }) {
         <div style={{ padding:"10px 14px", borderTop:`1px solid ${S.border}`, fontSize:10, color:S.textFaint }}>
           <div style={{ display:"flex", alignItems:"center", gap:6 }}>
             <span style={{ width:5, height:5, borderRadius:"50%", background:S.green, boxShadow:`0 0 5px ${S.green}` }} />
-            Groq · LLaMA-3 70B · Agentic
+            Groq · LLaMA-3 70B · Tool Use
           </div>
         </div>
       </div>
@@ -566,12 +612,12 @@ export default function App({ token, username, onLogout, onProfile }) {
               {isMobile ? "CLR" : "CLEAR"}
             </button>
             {!isMobile && <div style={{ width:1, height:20, background:S.border2, margin:"0 4px" }} />}
-            {!isMobile && <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>}
+            {/* {!isMobile && <span style={{ fontSize:10, color:S.greenMid, letterSpacing:1 }}>{username}</span>} */}
             <button onClick={onProfile} title="Profile"
               style={{ background:"none", border:`1px solid ${S.border2}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:S.greenDim, fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.background="#0a1f12"; e.currentTarget.style.borderColor=S.greenMid; }}
               onMouseLeave={e => { e.currentTarget.style.background="none"; e.currentTarget.style.borderColor=S.border2; }}>
-              {isMobile ? "⚙" : "PROFILE"}
+              {isMobile ? "⚙" : username}
             </button>
             <button onClick={onLogout} title="Logout"
               style={{ background:"none", border:`1px solid #4a1525`, borderRadius:6, padding:"4px 10px", cursor:"pointer", color:"#ff4d6d", fontSize:10, fontFamily:S.mono, letterSpacing:1, transition:"all 0.2s" }}

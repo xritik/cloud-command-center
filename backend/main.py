@@ -143,8 +143,9 @@ class UpdateAWSAccountRequest(BaseModel):
 class AgentRequest(BaseModel):
     query: str
     region: str = "ap-south-1"
-    access_key: str = ""
-    secret_key: str = ""
+    account_id: str = ""
+    access_key: str = ""   # fallback: direct credentials (optional)
+    secret_key: str = ""   # fallback: direct credentials (optional)
 
 
 _groq_key_idx = 0
@@ -251,15 +252,41 @@ def me(username: str = Depends(get_current_user)):
 @app.post("/agent")
 def agent_query(req: AgentRequest, username: str = Depends(get_current_user)):
     """
-    The only way this app talks to AWS. No fixed tool list, no hardcoded
-    Boto3 functions - every query is answered by fresh, validated, sandboxed,
-    LLM-generated code running against the user's real AWS credentials.
+    The only way this app talks to AWS. Resolves AWS credentials by:
+    1. account_id → looks up + decrypts from MongoDB (preferred)
+    2. direct access_key/secret_key in request body (fallback)
+    3. AWS_ACCESS_KEY_ID/SECRET from .env (last resort)
     """
-    ak = req.access_key if req.access_key else os.getenv("AWS_ACCESS_KEY_ID")
-    sk = req.secret_key if req.secret_key else os.getenv("AWS_SECRET_ACCESS_KEY")
+    ak = None
+    sk = None
+
+    # Priority 1: look up account from MongoDB using account_id
+    if req.account_id and accounts_col is not None:
+        from bson import ObjectId
+        try:
+            acc = accounts_col.find_one({
+                "_id": ObjectId(req.account_id),
+                "username": username
+            })
+            if acc:
+                ak = decrypt_val(acc["access_key"])
+                sk = decrypt_val(acc["secret_key"])
+                logger.info(f"[agent] Using account '{acc['label']}' for user '{username}'")
+        except Exception as e:
+            logger.warning(f"[agent] Failed to load account {req.account_id}: {e}")
+
+    # Priority 2: direct credentials sent in request
+    if not ak and req.access_key:
+        ak = req.access_key
+        sk = req.secret_key
+
+    # Priority 3: .env fallback
+    if not ak:
+        ak = os.getenv("AWS_ACCESS_KEY_ID")
+        sk = os.getenv("AWS_SECRET_ACCESS_KEY")
 
     if not ak or not sk:
-        raise HTTPException(400, "No AWS credentials available. Please add an AWS account first.")
+        raise HTTPException(400, "No AWS credentials available. Please add an AWS account in Profile → Accounts.")
 
     logger.info(f"[agent] User '{username}' query: {req.query!r} | region={req.region}")
 

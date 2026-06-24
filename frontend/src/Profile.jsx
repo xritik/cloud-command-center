@@ -208,7 +208,7 @@ export default function Profile({ token, username, onBack, onLogout, onUsernameC
           <div style={{ maxWidth:600 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
               <div style={{ fontSize:11, color:S.textFaint, letterSpacing:1 }}>AWS ACCOUNTS ({accounts.length})</div>
-              {/* <Btn onClick={() => setShowAdd(!showAdd)} small variant="secondary">{showAdd ? "✕ CANCEL" : "+ ADD ACCOUNT"}</Btn> */}
+              <Btn onClick={() => setShowAdd(!showAdd)} small variant="secondary">{showAdd ? "✕ CANCEL" : "+ ADD ACCOUNT"}</Btn>
             </div>
 
             {/* Add account form */}

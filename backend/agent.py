@@ -86,6 +86,71 @@ class CodeExecutionError(Exception):
     pass
 
 
+# ── Phase 0: Intent classification ────────────────────────────────────────────
+def classify_intent(query: str, groq_caller) -> str:
+    """
+    Classifies the user's query into one of three buckets before any Boto3
+    code is generated:
+
+    - "data"      : asks about the user's actual AWS resources/state
+                    (e.g. "show running instances", "tell me about my EC2 fleet")
+    - "conceptual": asks what an AWS service/term/concept IS, generally
+                    (e.g. "what is EC2", "explain security groups")
+    - "off_topic" : not about AWS at all (e.g. "what's the weather")
+
+    Returns one of: "data", "conceptual", "off_topic"
+    """
+    system = (
+        "Classify the user's message into exactly one category. Reply with "
+        "ONLY one word, lowercase, no punctuation: data, conceptual, or off_topic.\n\n"
+        "- data: the user wants information about THEIR OWN AWS account/resources "
+        "(e.g. 'show running instances', 'list my buckets', 'tell me about my EC2 fleet', "
+        "'what's the CPU usage', 'how many volumes do I have').\n"
+        "- conceptual: the user is asking what an AWS service or term IS in general, "
+        "not asking about their own resources (e.g. 'what is EC2', 'what is a security group', "
+        "'explain how S3 works', 'difference between EBS and S3').\n"
+        "- off_topic: not related to AWS at all (e.g. weather, sports, math, general chit-chat).\n\n"
+        "When ambiguous, prefer 'data' if the query could plausibly be answered by looking at "
+        "the user's actual resources."
+    )
+    try:
+        response = groq_caller(
+            [{"role": "system", "content": system}, {"role": "user", "content": query}],
+            tools=None,
+        )
+        label = (response.choices[0].message.content or "").strip().lower()
+        if label not in ("data", "conceptual", "off_topic"):
+            return "data"  # safest default: fall through to the real pipeline
+        return label
+    except Exception as e:
+        logger.warning(f"[agent] Intent classification failed, defaulting to 'data': {e}")
+        return "data"
+
+
+def answer_conceptual_question(query: str, groq_caller) -> str:
+    """
+    Answers a general AWS knowledge question directly — no Boto3, no AWS
+    credentials touched. Used for questions like "what is EC2".
+    """
+    system = (
+        "You are an AWS infrastructure assistant. The user asked a general "
+        "conceptual question about AWS (not about their own account/resources). "
+        "Answer clearly and concisely in 2-4 sentences. If relevant, briefly "
+        "mention you can also look up their actual resources if they ask "
+        "(e.g. 'show my running instances')."
+    )
+    try:
+        response = groq_caller(
+            [{"role": "system", "content": system}, {"role": "user", "content": query}],
+            tools=None,
+        )
+        text = response.choices[0].message.content
+        return text.strip() if text else "I'm not able to answer that right now."
+    except Exception as e:
+        logger.warning(f"[agent] Conceptual answer generation failed: {e}")
+        return "I'm not able to answer that right now."
+
+
 # ── Phase 4: Result summarization ─────────────────────────────────────────────
 def build_summary_prompt(query: str, result) -> list:
     """
@@ -100,7 +165,10 @@ def build_summary_prompt(query: str, result) -> list:
         "Write a clear, concise, human-readable answer using ONLY the data given. "
         "Never invent IDs, IPs, names, or values not present in the JSON. "
         "If the JSON contains an 'error' key, explain the error plainly to the user. "
-        "If a list is empty, say so directly. Use short bullet points for multiple items."
+        "If a list is empty, say so in plain natural language matching the user's own "
+        "wording — e.g. for a query about EC2 instances with no results, say "
+        "\"You don't have any EC2 instances in this region\" rather than a generic "
+        "phrase like 'the list is empty'. Use short bullet points for multiple items."
     )
     user_content = f"User query: {query}\n\nRaw result JSON:\n{result_json}"
     return [
@@ -127,19 +195,11 @@ def build_codegen_prompt(query: str, region: str, previous_error: str = None, pr
     system = f"""You are an expert AWS Boto3 code generator. You write exactly ONE Python function
 named `run` that answers the user's AWS query using read-only Boto3 calls.
 
-IMPORTANT — SCOPE RESTRICTION:
-You ONLY answer questions about AWS infrastructure resources such as:
-EC2 instances, CloudWatch metrics, S3 buckets, RDS databases, Lambda functions,
-IAM roles, VPCs, security groups, EBS volumes, load balancers, Route53, SNS, SQS, ECS, EKS.
+The user's query has already been confirmed to be a legitimate request about their own
+AWS resources (EC2 instances, CloudWatch metrics, S3 buckets, RDS, Lambda, IAM, VPCs,
+security groups, EBS volumes, load balancers, Route53, SNS, SQS, ECS, EKS, etc).
 
-If the user's query is NOT about AWS infrastructure (e.g. general knowledge, people,
-news, math, opinions, or any non-AWS topic), you MUST return this exact Python function
-and nothing else:
-
-def run(region, access_key, secret_key):
-    return {{"off_topic": True, "message": "I can only answer questions about your AWS infrastructure. Please ask me about your EC2 instances, metrics, storage, or other AWS resources."}}
-
-STRICT RULES (for valid AWS queries):
+STRICT RULES:
 - Define exactly one function: def run(region, access_key, secret_key):
 - Only import: boto3, json, datetime (no other imports, no "import os" etc.)
 - Only call read-only boto3 methods: describe_*, get_*, list_*, head_*
@@ -317,6 +377,28 @@ def run_agent_query(query: str, region: str, access_key: str, secret_key: str, g
     last_error = None
     last_code = None
 
+    # ── Phase 0: classify intent before touching AWS or generating any code ───
+    intent = classify_intent(query, groq_caller)
+    logger.info(f"[agent] Query classified as: {intent!r}")
+
+    if intent == "off_topic":
+        return {
+            "agent_used": True,
+            "reply": "I can only answer questions about AWS — your infrastructure, "
+                     "or general AWS concepts. Try asking something like "
+                     "'show my running instances' or 'what is an EBS volume'.",
+            "intent": "off_topic",
+        }
+
+    if intent == "conceptual":
+        reply = answer_conceptual_question(query, groq_caller)
+        return {
+            "agent_used": True,
+            "reply": reply,
+            "intent": "conceptual",
+        }
+
+    # intent == "data" — proceed with the normal generate -> validate -> execute pipeline
     for attempt in range(MAX_RETRIES + 1):
         try:
             code = generate_code(
@@ -331,14 +413,6 @@ def run_agent_query(query: str, region: str, access_key: str, secret_key: str, g
             result = execute_code(code, region, access_key, secret_key)
             logger.info(f"[agent] Execution succeeded on attempt {attempt + 1}")
 
-            # Check if agent flagged query as off-topic
-            if isinstance(result, dict) and result.get("off_topic"):
-                return {
-                    "agent_used": True,
-                    "reply": result["message"],
-                    "result": result,
-                }
-
             reply = summarize_result(query, result, groq_caller)
 
             return {
@@ -346,6 +420,7 @@ def run_agent_query(query: str, region: str, access_key: str, secret_key: str, g
                 "reply": reply,
                 "result": result,
                 "generated_code": code,
+                "intent": "data",
             }
 
         except CodeSafetyError as e:
